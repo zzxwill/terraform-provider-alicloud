@@ -1,4 +1,5 @@
 ---
+subcategory: "Container Service (CS)"
 layout: "alicloud"
 page_title: "Alicloud: alicloud_cs_application"
 sidebar_current: "docs-alicloud-resource-cs-application"
@@ -7,6 +8,8 @@ description: |-
 ---
 
 # alicloud\_cs\_application
+
+-> **DEPRECATED:** This resource manages applications in swarm cluster only, which is being deprecated and will be replaced by Kubernetes cluster.
 
 This resource use an orchestration template to define and deploy a multi-container application. An application is created by using an orchestration template.
 Each application can contain one or more services.
@@ -22,9 +25,9 @@ Basic Usage
 ```
 resource "alicloud_cs_application" "app" {
   cluster_name = "my-first-swarm"
-  name = "wordpress"
-  version = "1.2"
-  template = "${file("wordpress.yml")}"
+  name         = "wordpress"
+  version      = "1.2"
+  template     = "${file("wordpress.yml")}"
   latest_image = true
   environment = {
     EXTERNAL_URL = "123.123.123.123:8080"
@@ -35,11 +38,11 @@ resource "alicloud_cs_application" "app" {
 
 The following arguments are supported:
 
-* `cluster_name` - (Required, Force new resource) The swarm cluster's name.
-* `name` - (Required, Force new resource) The application name. It should be 1-64 characters long, and can contain numbers, English letters and hyphens, but cannot start with hyphens.
+* `cluster_name` - (Required, ForceNew) The swarm cluster's name.
+* `name` - (Required, ForceNew) The application name. It should be 1-64 characters long, and can contain numbers, English letters and hyphens, but cannot start with hyphens.
 * `description` - The description of application.
 * `version` - The application deploying version. Each updating, it must be different with current. Default to "1.0"
-* `template` - The application deployment template and it must be [Docker Compose format](https://docs.docker.com/compose/).
+* `template` - (Required) The application deployment template and it must be [Docker Compose format](https://docs.docker.com/compose/).
 * `environment` - A key/value map used to replace the variable parameter in the Compose template.
 * `latest_image` - Whether to use latest docker image while each updating application. Default to false.
 * `blue_green` - Wherther to use "Blue Green" method when release a new version. Default to false.
@@ -53,7 +56,7 @@ The following arguments are supported:
 
 The following attributes are exported:
 
-* `id` - The ID of the container application. It's formate is <cluster_name>:<name>
+* `id` - The ID of the container application. It's formate is `<cluster_name>:<name>`.
 * `cluster_name` - The name of the container cluster.
 * `name` - The application name.
 * `description` - The application description.

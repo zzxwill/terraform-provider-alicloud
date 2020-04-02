@@ -76,6 +76,19 @@ func (client *Client) SetUserAgent(userAgent string) {
 	client.userAgent = userAgent
 }
 
+// SetEndpoint sets customer endpoint
+func (client *Client) SetEndpoint(endpoint string) {
+	client.endpoint = endpoint
+}
+
+// SetTransport sets transport to the http client
+func (client *Client) SetTransport(transport http.RoundTripper) {
+	if client.httpClient == nil {
+		client.httpClient = &http.Client{}
+	}
+	client.httpClient.Transport = transport
+}
+
 type Request struct {
 	Method          string
 	URL             string
@@ -133,7 +146,7 @@ func (client *Client) Invoke(region common.Region, method string, path string, q
 	// TODO move to util and add build val flag
 	httpReq.Header.Set("Date", util.GetGMTime())
 	httpReq.Header.Set("Accept", "application/json")
-	//httpReq.Header.Set("x-acs-version", client.Version)
+	httpReq.Header["x-acs-version"] = []string{client.Version}
 	httpReq.Header["x-acs-signature-version"] = []string{"1.0"}
 	httpReq.Header["x-acs-signature-nonce"] = []string{util.CreateRandomString()}
 	httpReq.Header["x-acs-signature-method"] = []string{"HMAC-SHA1"}
@@ -174,7 +187,7 @@ func (client *Client) Invoke(region common.Region, method string, path string, q
 	if client.debug {
 		var prettyJSON bytes.Buffer
 		err = json.Indent(&prettyJSON, body, "", "    ")
-		log.Println(string(prettyJSON.Bytes()))
+		log.Println(prettyJSON.String())
 	}
 
 	if statusCode >= 400 && statusCode <= 599 {
@@ -187,7 +200,7 @@ func (client *Client) Invoke(region common.Region, method string, path string, q
 		return ecsError
 	}
 
-	if response != nil {
+	if response != nil && len(body) > 0 {
 		err = json.Unmarshal(body, response)
 		//log.Printf("%++v", response)
 		if err != nil {

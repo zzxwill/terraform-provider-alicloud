@@ -76,11 +76,11 @@ func (client *Client) DeleteNatGatewayWithCallback(request *DeleteNatGatewayRequ
 // DeleteNatGatewayRequest is the request struct for api DeleteNatGateway
 type DeleteNatGatewayRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
 	NatGatewayId         string           `position:"Query" name:"NatGatewayId"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
+	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
 	Force                requests.Boolean `position:"Query" name:"Force"`
 }
 
@@ -95,7 +95,7 @@ func CreateDeleteNatGatewayRequest() (request *DeleteNatGatewayRequest) {
 	request = &DeleteNatGatewayRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "DeleteNatGateway", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "DeleteNatGateway", "Vpc", "openAPI")
 	return
 }
 

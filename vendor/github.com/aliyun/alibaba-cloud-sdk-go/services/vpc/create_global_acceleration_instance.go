@@ -76,17 +76,16 @@ func (client *Client) CreateGlobalAccelerationInstanceWithCallback(request *Crea
 // CreateGlobalAccelerationInstanceRequest is the request struct for api CreateGlobalAccelerationInstance
 type CreateGlobalAccelerationInstanceRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
+	BandwidthType        string           `position:"Query" name:"BandwidthType"`
+	ClientToken          string           `position:"Query" name:"ClientToken"`
+	Description          string           `position:"Query" name:"Description"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ServiceLocation      string           `position:"Query" name:"ServiceLocation"`
 	Bandwidth            string           `position:"Query" name:"Bandwidth"`
-	InternetChargeType   string           `position:"Query" name:"InternetChargeType"`
-	BandwidthType        string           `position:"Query" name:"BandwidthType"`
-	Name                 string           `position:"Query" name:"Name"`
-	Description          string           `position:"Query" name:"Description"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
-	ClientToken          string           `position:"Query" name:"ClientToken"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
+	Name                 string           `position:"Query" name:"Name"`
 }
 
 // CreateGlobalAccelerationInstanceResponse is the response struct for api CreateGlobalAccelerationInstance
@@ -102,7 +101,7 @@ func CreateCreateGlobalAccelerationInstanceRequest() (request *CreateGlobalAccel
 	request = &CreateGlobalAccelerationInstanceRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "CreateGlobalAccelerationInstance", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "CreateGlobalAccelerationInstance", "Vpc", "openAPI")
 	return
 }
 

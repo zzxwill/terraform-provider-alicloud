@@ -4,68 +4,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/denverdino/aliyungo/ecs"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/terraform"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
-
-func TestAccAlicloudKeyPairAttachment_basic(t *testing.T) {
-	var keypair ecs.KeyPairItemType
-	var instance ecs.InstanceAttributesType
-
-	resource.Test(t, resource.TestCase{
-		PreCheck: func() {
-			testAccPreCheck(t)
-		},
-
-		// module name
-		IDRefreshName: "alicloud_key_pair_attachment.attach",
-		Providers:     testAccProviders,
-		CheckDestroy:  testAccCheckKeyPairAttachmentDestroy,
-		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccKeyPairAttachmentConfig,
-				Check: resource.ComposeTestCheckFunc(
-					testAccCheckKeyPairExists(
-						"alicloud_key_pair.key", &keypair),
-					testAccCheckInstanceExists(
-						"alicloud_instance.instance.0", &instance),
-					testAccCheckKeyPairAttachmentExists(
-						"alicloud_key_pair_attachment.attach", &instance, &keypair),
-				),
-			},
-		},
-	})
-
-}
-
-func testAccCheckKeyPairAttachmentExists(n string, instance *ecs.InstanceAttributesType, keypair *ecs.KeyPairItemType) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[n]
-		if !ok {
-			return fmt.Errorf("Not found: %s", n)
-		}
-
-		if rs.Primary.ID == "" {
-			return fmt.Errorf("No Key Pair Attachment ID is set")
-		}
-
-		client := testAccProvider.Meta().(*AliyunClient)
-
-		response, err := client.QueryInstancesById(instance.InstanceId)
-		if err != nil {
-			return fmt.Errorf("Error QueryInstancesById: %#v", err)
-		}
-
-		if response != nil && response.KeyPairName == keypair.KeyPairName {
-			keypair.KeyPairName = response.KeyPairName
-			instance = response
-			return nil
-
-		}
-		return fmt.Errorf("Error KeyPairAttachment is not exist.")
-	}
-}
 
 func testAccCheckKeyPairAttachmentDestroy(s *terraform.State) error {
 
@@ -74,17 +17,18 @@ func testAccCheckKeyPairAttachmentDestroy(s *terraform.State) error {
 			continue
 		}
 		// Try to find the Disk
-		client := testAccProvider.Meta().(*AliyunClient)
+		client := testAccProvider.Meta().(*connectivity.AliyunClient)
+		ecsService := EcsService{client}
 
-		instance_ids := rs.Primary.Attributes["instance_ids"]
+		instanceIds := rs.Primary.Attributes["instance_ids"]
 
-		for _, inst := range instance_ids {
-			response, err := client.QueryInstancesById(string(inst))
+		for _, inst := range instanceIds {
+			response, err := ecsService.DescribeInstance(string(inst))
 			if err != nil {
 				return err
 			}
 
-			if response != nil && response.KeyPairName != "" {
+			if response.KeyPairName != "" {
 				return fmt.Errorf("Error Key Pair Attachment still exist")
 			}
 
@@ -94,58 +38,98 @@ func testAccCheckKeyPairAttachmentDestroy(s *terraform.State) error {
 	return nil
 }
 
-const testAccKeyPairAttachmentConfig = `
-variable "count_format" {
-  default = "%02d"
-}
-variable "availability_zones" {
-  default = "cn-beijing-d"
+func TestAccAlicloudKeyPairAttachmentBasic(t *testing.T) {
+	var v ecs.KeyPair
+	resourceId := "alicloud_key_pair_attachment.default"
+	ra := resourceAttrInit(resourceId, testAccCheckKeyPairAttachmentBasicMap)
+	serviceFunc := func() interface{} {
+		return &EcsService{testAccProvider.Meta().(*connectivity.AliyunClient)}
+	}
+	rc := resourceCheckInit(resourceId, &v, serviceFunc)
+	rac := resourceAttrCheckInit(rc, ra)
+	testAccCheck := rac.resourceAttrMapUpdateSet()
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+		},
+
+		// module name
+		IDRefreshName: resourceId,
+		Providers:     testAccProviders,
+		CheckDestroy:  testAccCheckKeyPairAttachmentDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccKeyPairAttachmentConfigBasic,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheck(nil),
+				),
+			},
+		},
+	})
+
 }
 
-resource "alicloud_vpc" "main" {
-  name = "vpc-for-keypair"
+const testAccKeyPairAttachmentConfigBasic = `
+data "alicloud_zones" "default" {
+	available_disk_category = "cloud_ssd"
+	available_resource_creation= "VSwitch"
+}
+data "alicloud_instance_types" "default" {
+ 	availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+}
+data "alicloud_images" "default" {
+	name_regex = "^ubuntu_18.*64"
+	most_recent = true
+	owners = "system"
+}
+variable "name" {
+	default = "tf-testAccKeyPairAttachmentConfig"
+}
+
+resource "alicloud_vpc" "default" {
+  name = "${var.name}"
   cidr_block = "10.1.0.0/21"
 }
 
-resource "alicloud_vswitch" "main" {
-  vpc_id = "${alicloud_vpc.main.id}"
+resource "alicloud_vswitch" "default" {
+  vpc_id = "${alicloud_vpc.default.id}"
   cidr_block = "10.1.1.0/24"
-  availability_zone = "${var.availability_zones}"
-  depends_on = [
-    "alicloud_vpc.main"]
+  availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+  name = "${var.name}"
 }
-resource "alicloud_security_group" "group" {
-  name = "test-for-keypair"
+resource "alicloud_security_group" "default" {
+  name = "${var.name}"
   description = "New security group"
-  vpc_id = "${alicloud_vpc.main.id}"
+  vpc_id = "${alicloud_vpc.default.id}"
 }
 
-resource "alicloud_instance" "instance" {
-  instance_name = "test-keypair-${format(var.count_format, count.index+1)}"
-  image_id = "ubuntu_140405_64_40G_cloudinit_20161115.vhd"
-  instance_type = "ecs.n4.small"
+resource "alicloud_instance" "default" {
+  instance_name = "${var.name}-${count.index+1}"
+  image_id = "${data.alicloud_images.default.images.0.id}"
+  instance_type = "${data.alicloud_instance_types.default.instance_types.0.id}"
   count = 2
-  availability_zone = "${var.availability_zones}"
-  security_groups = ["${alicloud_security_group.group.id}"]
-  vswitch_id = "${alicloud_vswitch.main.id}"
+  security_groups = ["${alicloud_security_group.default.id}"]
+  vswitch_id = "${alicloud_vswitch.default.id}"
 
   internet_charge_type = "PayByTraffic"
   internet_max_bandwidth_out = 5
-
-  allocate_public_ip = "true"
-
-  password = "Test12345"
+  password = "Yourpassword1234"
 
   instance_charge_type = "PostPaid"
   system_disk_category = "cloud_ssd"
 }
 
-resource "alicloud_key_pair" "key" {
-  key_name = "terraform-test-key-pair-attachment"
+resource "alicloud_key_pair" "default" {
+  key_name = "${var.name}"
 }
 
-resource "alicloud_key_pair_attachment" "attach" {
-  key_name = "${alicloud_key_pair.key.id}"
-  instance_ids = ["${alicloud_instance.instance.*.id}"]
+resource "alicloud_key_pair_attachment" "default" {
+  key_name = "${alicloud_key_pair.default.id}"
+  instance_ids = "${alicloud_instance.default.*.id}"
 }
 `
+
+var testAccCheckKeyPairAttachmentBasicMap = map[string]string{
+	"key_name":       CHECKSET,
+	"instance_ids.#": "2",
+}

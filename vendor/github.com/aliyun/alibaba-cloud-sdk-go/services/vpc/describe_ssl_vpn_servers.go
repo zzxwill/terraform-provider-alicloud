@@ -76,15 +76,15 @@ func (client *Client) DescribeSslVpnServersWithCallback(request *DescribeSslVpnS
 // DescribeSslVpnServersRequest is the request struct for api DescribeSslVpnServers
 type DescribeSslVpnServersRequest struct {
 	*requests.RpcRequest
-	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	SslVpnServerId       string           `position:"Query" name:"SslVpnServerId"`
-	VpnGatewayId         string           `position:"Query" name:"VpnGatewayId"`
-	Name                 string           `position:"Query" name:"Name"`
 	PageNumber           requests.Integer `position:"Query" name:"PageNumber"`
+	SslVpnServerId       string           `position:"Query" name:"SslVpnServerId"`
 	PageSize             requests.Integer `position:"Query" name:"PageSize"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
+	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	VpnGatewayId         string           `position:"Query" name:"VpnGatewayId"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
+	Name                 string           `position:"Query" name:"Name"`
 }
 
 // DescribeSslVpnServersResponse is the response struct for api DescribeSslVpnServers
@@ -102,7 +102,7 @@ func CreateDescribeSslVpnServersRequest() (request *DescribeSslVpnServersRequest
 	request = &DescribeSslVpnServersRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "DescribeSslVpnServers", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "DescribeSslVpnServers", "Vpc", "openAPI")
 	return
 }
 

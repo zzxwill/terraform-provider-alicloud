@@ -3,9 +3,10 @@ variable "slb_name" {
 }
 
 variable "internet_charge_type" {
-  default = "paybytraffic"
+  default = "PayByTraffic"
 }
 
-variable "internet" {
-  default = true
+variable "address_type" {
+  default = "internet"
 }
+

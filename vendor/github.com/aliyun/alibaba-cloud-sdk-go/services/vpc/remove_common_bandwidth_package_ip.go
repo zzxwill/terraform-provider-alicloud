@@ -76,11 +76,11 @@ func (client *Client) RemoveCommonBandwidthPackageIpWithCallback(request *Remove
 // RemoveCommonBandwidthPackageIpRequest is the request struct for api RemoveCommonBandwidthPackageIp
 type RemoveCommonBandwidthPackageIpRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
 	BandwidthPackageId   string           `position:"Query" name:"BandwidthPackageId"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
+	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
 	IpInstanceId         string           `position:"Query" name:"IpInstanceId"`
 }
 
@@ -95,7 +95,7 @@ func CreateRemoveCommonBandwidthPackageIpRequest() (request *RemoveCommonBandwid
 	request = &RemoveCommonBandwidthPackageIpRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "RemoveCommonBandwidthPackageIp", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "RemoveCommonBandwidthPackageIp", "Vpc", "openAPI")
 	return
 }
 

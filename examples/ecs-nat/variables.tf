@@ -7,11 +7,11 @@ variable "vswitch_cidr" {
 }
 
 variable "zone" {
-  default = "cn-beijing-c"
+  default = "cn-hangzhou-i"
 }
 
 variable "image" {
-  default = "ubuntu_140405_64_40G_cloudinit_20161115.vhd"
+  default = "ubuntu_18_04_64_20G_alibase_20190624.vhd"
 }
 
 variable "instance_nat_type" {
@@ -25,3 +25,4 @@ variable "instance_worker_type" {
 variable "instance_pwd" {
   default = "Test123456"
 }
+

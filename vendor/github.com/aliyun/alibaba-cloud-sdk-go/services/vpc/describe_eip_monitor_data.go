@@ -76,14 +76,14 @@ func (client *Client) DescribeEipMonitorDataWithCallback(request *DescribeEipMon
 // DescribeEipMonitorDataRequest is the request struct for api DescribeEipMonitorData
 type DescribeEipMonitorDataRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
 	AllocationId         string           `position:"Query" name:"AllocationId"`
 	StartTime            string           `position:"Query" name:"StartTime"`
-	EndTime              string           `position:"Query" name:"EndTime"`
 	Period               requests.Integer `position:"Query" name:"Period"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	EndTime              string           `position:"Query" name:"EndTime"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
 }
 
 // DescribeEipMonitorDataResponse is the response struct for api DescribeEipMonitorData
@@ -98,7 +98,7 @@ func CreateDescribeEipMonitorDataRequest() (request *DescribeEipMonitorDataReque
 	request = &DescribeEipMonitorDataRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "DescribeEipMonitorData", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "DescribeEipMonitorData", "Vpc", "openAPI")
 	return
 }
 

@@ -1,4 +1,5 @@
 ---
+subcategory: "VPC"
 layout: "alicloud"
 page_title: "Alicloud: alicloud_vswitch"
 sidebar_current: "docs-alicloud-resource-vswitch"
@@ -26,15 +27,22 @@ resource "alicloud_vswitch" "vsw" {
   availability_zone = "cn-beijing-b"
 }
 ```
+
+## Module Support
+
+You can use to the existing [vpc module](https://registry.terraform.io/modules/alibaba/vpc/alicloud) 
+to create a VPC and several VSwitches one-click.
+
 ## Argument Reference
 
 The following arguments are supported:
 
-* `availability_zone` - (Required, Forces new resource) The AZ for the switch.
-* `vpc_id` - (Required, Forces new resource) The VPC ID.
-* `cidr_block` - (Required, Forces new resource) The CIDR block for the switch.
+* `availability_zone` - (Required, ForceNew) The AZ for the switch.
+* `vpc_id` - (Required, ForceNew) The VPC ID.
+* `cidr_block` - (Required, ForceNew) The CIDR block for the switch.
 * `name` - (Optional) The name of the switch. Defaults to null.
 * `description` - (Optional) The switch description. Defaults to null.
+* `tags` - (Optional, Available in v1.55.3+) A mapping of tags to assign to the resource.
 
 ## Attributes Reference
 

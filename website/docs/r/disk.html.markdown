@@ -1,4 +1,5 @@
 ---
+subcategory: "ECS"
 layout: "alicloud"
 page_title: "Alicloud: alicloud_disk"
 sidebar_current: "docs-alicloud-resource-disk"
@@ -10,7 +11,7 @@ description: |-
 
 Provides a ECS disk resource.
 
-~> **NOTE:** One of `size` or `snapshot_id` is required when specifying an ECS disk. If all of them be specified, `size` must more than the size of snapshot which `snapshot_id` represents. Currently, `alicloud_disk` doesn't resize disk.
+-> **NOTE:** One of `size` or `snapshot_id` is required when specifying an ECS disk. If all of them be specified, `size` must more than the size of snapshot which `snapshot_id` represents. Currently, `alicloud_disk` doesn't resize disk.
 
 ## Example Usage
 
@@ -24,7 +25,7 @@ resource "alicloud_disk" "ecs_disk" {
   category          = "cloud_efficiency"
   size              = "30"
 
-  tags {
+  tags = {
     Name = "TerraformTest"
   }
 }
@@ -33,31 +34,26 @@ resource "alicloud_disk" "ecs_disk" {
 
 The following arguments are supported:
 
-* `availability_zone` - (Required, Forces new resource) The Zone to create the disk in.
+* `availability_zone` - (Required, ForceNew) The Zone to create the disk in.
 * `name` - (Optional) Name of the ECS disk. This name can have a string of 2 to 128 characters, must contain only alphanumeric characters or hyphens, such as "-",".","_", and must not begin or end with a hyphen, and must not begin with http:// or https://. Default value is null.
 * `description` - (Optional) Description of the disk. This description can have a string of 2 to 256 characters, It cannot begin with http:// or https://. Default value is null.
-* `category` - (Optional, Forces new resource) Category of the disk. Valid values are `cloud`, `cloud_efficiency` and `cloud_ssd`. Default is `cloud_efficiency`.
-* `size` - (Required) The size of the disk in GiBs, and it value range: 20 ~ 32768.
-* `snapshot_id` - (Optional) A snapshot to base the disk off of. If it is specified, `size` will be invalid and the disk size is equals to the snapshot size.
+* `category` - (Optional, ForceNew) Category of the disk. Valid values are `cloud`, `cloud_efficiency`, `cloud_ssd`, `cloud_essd`. Default is `cloud_efficiency`.
+* `size` - (Required) The size of the disk in GiBs. When resize the disk, the new size must be greater than the former value, or you would get an error `InvalidDiskSize.TooSmall`.
+* `snapshot_id` - (Optional) A snapshot to base the disk off of. If the disk size required by snapshot is greater than `size`, the `size` will be ignored, conflict with `encrypted`.
 * `tags` - (Optional) A mapping of tags to assign to the resource.
-* `encrypted` - (Optional) If true, the disk will be encrypted
-
-~> **NOTE:** Disk category `cloud` has been outdated and it only can be used none I/O Optimized ECS instances. Recommend `cloud_efficiency` and `cloud_ssd` disk.
+* `encrypted` - (Optional) If true, the disk will be encrypted, conflict with `snapshot_id`.
+* `delete_auto_snapshot` - (Optional Available in 1.53.0+) Indicates whether the automatic snapshot is deleted when the disk is released. Default value: false.
+* `delete_with_instance` - (Optional Available in 1.53.0+) Indicates whether the disk is released together with the instance: Default value: false.
+* `enable_auto_snapshot` - (Optional Available in 1.53.0+) Indicates whether to apply a created automatic snapshot policy to the disk. Default value: false.
+* `resource_group_id` - (ForceNew, ForceNew, Available in 1.57.0+) The Id of resource group which the disk belongs.
+-> **NOTE:** Disk category `cloud` has been outdated and it only can be used none I/O Optimized ECS instances. Recommend `cloud_efficiency` and `cloud_ssd` disk.
 
 ## Attributes Reference
 
 The following attributes are exported:
 
-* `id` - The disk ID.
-* `availability_zone` - The Zone to create the disk in.
-* `name` - The disk name.
-* `description` - The disk description.
+* `id` - The ID of the disk.
 * `status` - The disk status.
-* `category` - The disk category.
-* `size` - The disk size.
-* `snapshot_id` - The disk snapshot ID.
-* `tags` - The disk tags.
-* `encrypted` - Whether the disk is encrypted.
 
 ## Import
 

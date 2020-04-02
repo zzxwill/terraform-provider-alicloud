@@ -2,13 +2,10 @@ package alicloud
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"os"
 
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"github.com/hashicorp/terraform/helper/hashcode"
-	"github.com/hashicorp/terraform/helper/schema"
 )
 
 // Generates a hash for the set hash function used by the ID
@@ -20,14 +17,6 @@ func dataResourceIdHash(ids []string) string {
 	}
 
 	return fmt.Sprintf("%d", hashcode.String(buf.String()))
-}
-
-func writeToFile(filePath string, data interface{}) {
-	os.Remove(filePath)
-	if bs, err := json.MarshalIndent(data, "", "\t"); err == nil {
-		str := string(bs)
-		ioutil.WriteFile(filePath, []byte(str), 777)
-	}
 }
 
 func outputInstancesSchema() map[string]*schema.Schema {
@@ -77,6 +66,23 @@ func outputInstancesSchema() map[string]*schema.Schema {
 			Computed: true,
 		},
 		"status": {
+			Type:     schema.TypeString,
+			Computed: true,
+		},
+	}
+}
+
+func outputShortVpcsSchema() map[string]*schema.Schema {
+	return map[string]*schema.Schema{
+		"region_id": {
+			Type:     schema.TypeString,
+			Computed: true,
+		},
+		"vpc_id": {
+			Type:     schema.TypeString,
+			Computed: true,
+		},
+		"vpc_name": {
 			Type:     schema.TypeString,
 			Computed: true,
 		},

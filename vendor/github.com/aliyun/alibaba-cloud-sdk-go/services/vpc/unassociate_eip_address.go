@@ -76,13 +76,16 @@ func (client *Client) UnassociateEipAddressWithCallback(request *UnassociateEipA
 // UnassociateEipAddressRequest is the request struct for api UnassociateEipAddress
 type UnassociateEipAddressRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
+	ClientToken          string           `position:"Query" name:"ClientToken"`
 	AllocationId         string           `position:"Query" name:"AllocationId"`
-	InstanceId           string           `position:"Query" name:"InstanceId"`
-	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
 	InstanceType         string           `position:"Query" name:"InstanceType"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
+	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
+	PrivateIpAddress     string           `position:"Query" name:"PrivateIpAddress"`
+	InstanceId           string           `position:"Query" name:"InstanceId"`
+	Force                requests.Boolean `position:"Query" name:"Force"`
 }
 
 // UnassociateEipAddressResponse is the response struct for api UnassociateEipAddress
@@ -96,7 +99,7 @@ func CreateUnassociateEipAddressRequest() (request *UnassociateEipAddressRequest
 	request = &UnassociateEipAddressRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "UnassociateEipAddress", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "UnassociateEipAddress", "Vpc", "openAPI")
 	return
 }
 

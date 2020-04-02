@@ -2,15 +2,33 @@ package alicloud
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/slb"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/vpc"
+
+	"strconv"
+
 	"github.com/denverdino/aliyungo/common"
 	"github.com/denverdino/aliyungo/cs"
-	"github.com/denverdino/aliyungo/ecs"
-	"github.com/denverdino/aliyungo/slb"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
+)
+
+const (
+	KubernetesClusterNetworkTypeFlannel = "flannel"
+	KubernetesClusterNetworkTypeTerway  = "terway"
+
+	KubernetesClusterLoggingTypeSLS = "SLS"
+)
+
+var (
+	KubernetesClusterNodeCIDRMasksByDefault = 24
 )
 
 func resourceAlicloudCSKubernetes() *schema.Resource {
@@ -23,132 +41,334 @@ func resourceAlicloudCSKubernetes() *schema.Resource {
 			State: schema.ImportStatePassthrough,
 		},
 
+		Timeouts: &schema.ResourceTimeout{
+			Create: schema.DefaultTimeout(90 * time.Minute),
+			Update: schema.DefaultTimeout(60 * time.Minute),
+			Delete: schema.DefaultTimeout(60 * time.Minute),
+		},
+
 		Schema: map[string]*schema.Schema{
-			"name": &schema.Schema{
+			"name": {
 				Type:          schema.TypeString,
 				Optional:      true,
 				Computed:      true,
-				ValidateFunc:  validateContainerName,
+				ValidateFunc:  validation.StringLenBetween(1, 63),
 				ConflictsWith: []string{"name_prefix"},
 			},
-			"name_prefix": &schema.Schema{
+			"name_prefix": {
 				Type:          schema.TypeString,
 				Optional:      true,
 				Default:       "Terraform-Creation",
-				ValidateFunc:  validateContainerNamePrefix,
+				ValidateFunc:  validation.StringLenBetween(0, 37),
 				ConflictsWith: []string{"name"},
+				Deprecated:    "Field 'name_prefix' has been deprecated from provider version 1.75.0.",
 			},
-			"availability_zone": &schema.Schema{
+			// master configurations
+			"master_vswitch_ids": {
+				Type:     schema.TypeList,
+				Required: true,
+				Elem: &schema.Schema{
+					Type:         schema.TypeString,
+					ValidateFunc: validation.StringMatch(regexp.MustCompile(`^vsw-[a-z0-9]*$`), "should start with 'vsw-'."),
+				},
+				MinItems:         3,
+				MaxItems:         5,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"master_instance_types": {
+				Type:     schema.TypeList,
+				Required: true,
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
+				},
+				MinItems:         3,
+				MaxItems:         5,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"master_disk_size": {
+				Type:             schema.TypeInt,
+				Optional:         true,
+				Default:          40,
+				ValidateFunc:     validation.IntBetween(40, 500),
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"master_disk_category": {
 				Type:     schema.TypeString,
 				Optional: true,
-				ForceNew: true,
-				Computed: true,
+				Default:  DiskCloudEfficiency,
+				ValidateFunc: validation.StringInSlice([]string{
+					string(DiskCloudEfficiency), string(DiskCloudSSD)}, false),
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
 			},
-			"vswitch_id": &schema.Schema{
+			"master_instance_charge_type": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				ValidateFunc:     validation.StringInSlice([]string{string(common.PrePaid), string(common.PostPaid)}, false),
+				Default:          PostPaid,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"master_period_unit": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				Default:          Month,
+				ValidateFunc:     validation.StringInSlice([]string{"Week", "Month"}, false),
+				DiffSuppressFunc: csKubernetesMasterPostPaidDiffSuppressFunc,
+			},
+			"master_period": {
+				Type:     schema.TypeInt,
+				Optional: true,
+				Default:  1,
+				// must be a valid period, expected [1-9], 12, 24, 36, 48 or 60,
+				ValidateFunc: validation.Any(
+					validation.IntBetween(1, 9),
+					validation.IntInSlice([]int{12, 24, 36, 48, 60})),
+				DiffSuppressFunc: csKubernetesMasterPostPaidDiffSuppressFunc,
+			},
+			"master_auto_renew": {
+				Type:             schema.TypeBool,
+				Default:          false,
+				Optional:         true,
+				DiffSuppressFunc: csKubernetesMasterPostPaidDiffSuppressFunc,
+			},
+			"master_auto_renew_period": {
+				Type:             schema.TypeInt,
+				Optional:         true,
+				Default:          1,
+				ValidateFunc:     validation.IntInSlice([]int{1, 2, 3, 6, 12}),
+				DiffSuppressFunc: csKubernetesMasterPostPaidDiffSuppressFunc,
+			},
+			// worker configurations
+			"worker_vswitch_ids": {
+				Type:     schema.TypeList,
+				Required: true,
+				Elem: &schema.Schema{
+					Type:         schema.TypeString,
+					ValidateFunc: validation.StringMatch(regexp.MustCompile(`^vsw-[a-z0-9]*$`), "should start with 'vsw-'."),
+				},
+				MinItems:         1,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"worker_instance_types": {
+				Type:     schema.TypeList,
+				Required: true,
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
+				},
+				MinItems: 1,
+				MaxItems: 10,
+			},
+			"worker_number": {
+				Type:     schema.TypeInt,
+				Required: true,
+			},
+			"worker_disk_size": {
+				Type:             schema.TypeInt,
+				Optional:         true,
+				Default:          40,
+				ValidateFunc:     validation.IntBetween(20, 32768),
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"worker_disk_category": {
 				Type:     schema.TypeString,
 				Optional: true,
-				ForceNew: true,
-				Computed: true,
+				Default:  DiskCloudEfficiency,
+				ValidateFunc: validation.StringInSlice([]string{
+					string(DiskCloudEfficiency), string(DiskCloudSSD)}, false),
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
 			},
-			"new_nat_gateway": &schema.Schema{
+			"worker_data_disk_size": {
+				Type:             schema.TypeInt,
+				Optional:         true,
+				Default:          40,
+				ValidateFunc:     validation.IntBetween(20, 32768),
+				DiffSuppressFunc: workerDataDiskSizeSuppressFunc,
+			},
+			"worker_data_disk_category": {
+				Type:     schema.TypeString,
+				Optional: true,
+				ValidateFunc: validation.StringInSlice([]string{
+					string(DiskCloudEfficiency), string(DiskCloudSSD)}, false),
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"worker_instance_charge_type": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				ValidateFunc:     validation.StringInSlice([]string{string(common.PrePaid), string(common.PostPaid)}, false),
+				Default:          PostPaid,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"worker_period_unit": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				Default:          Month,
+				ValidateFunc:     validation.StringInSlice([]string{"Week", "Month"}, false),
+				DiffSuppressFunc: csKubernetesWorkerPostPaidDiffSuppressFunc,
+			},
+			"worker_period": {
+				Type:     schema.TypeInt,
+				Optional: true,
+				Default:  1,
+				ValidateFunc: validation.Any(
+					validation.IntBetween(1, 9),
+					validation.IntInSlice([]int{12, 24, 36, 48, 60})),
+				DiffSuppressFunc: csKubernetesWorkerPostPaidDiffSuppressFunc,
+			},
+			"worker_auto_renew": {
+				Type:             schema.TypeBool,
+				Default:          false,
+				Optional:         true,
+				DiffSuppressFunc: csKubernetesWorkerPostPaidDiffSuppressFunc,
+			},
+			"worker_auto_renew_period": {
+				Type:             schema.TypeInt,
+				Optional:         true,
+				Default:          1,
+				ValidateFunc:     validation.IntInSlice([]int{1, 2, 3, 6, 12}),
+				DiffSuppressFunc: csKubernetesWorkerPostPaidDiffSuppressFunc,
+			},
+			// global configurations
+			// Terway network
+			"pod_vswitch_ids": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem: &schema.Schema{
+					Type:         schema.TypeString,
+					ValidateFunc: validation.StringMatch(regexp.MustCompile(`^vsw-[a-z0-9]*$`), "should start with 'vsw-'."),
+				},
+				MaxItems:         10,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			// Flannel network
+			"pod_cidr": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"service_cidr": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"node_cidr_mask": {
+				Type:             schema.TypeInt,
+				Optional:         true,
+				Default:          KubernetesClusterNodeCIDRMasksByDefault,
+				ValidateFunc:     validation.IntBetween(24, 28),
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"new_nat_gateway": {
 				Type:     schema.TypeBool,
 				Optional: true,
 				Default:  true,
 			},
-			"master_instance_type": &schema.Schema{
+			"password": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				Sensitive:        true,
+				ConflictsWith:    []string{"key_name", "kms_encrypted_password"},
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"key_name": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				ConflictsWith:    []string{"password", "kms_encrypted_password"},
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"kms_encrypted_password": {
+				Type:          schema.TypeString,
+				Optional:      true,
+				ConflictsWith: []string{"password", "key_name"},
+			},
+			"kms_encryption_context": {
+				Type:     schema.TypeMap,
+				Optional: true,
+				DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+					return d.Get("kms_encrypted_password").(string) == ""
+				},
+				Elem: schema.TypeString,
+			},
+			"user_ca": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"enable_ssh": {
+				Type:             schema.TypeBool,
+				Optional:         true,
+				Default:          false,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"image_id": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				DiffSuppressFunc: imageIdSuppressFunc,
+			},
+			"install_cloud_monitor": {
+				Type:             schema.TypeBool,
+				Optional:         true,
+				Default:          true,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			"version": {
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			// cpu policy options of kubelet
+			"cpu_policy": {
 				Type:         schema.TypeString,
-				Required:     true,
-				ValidateFunc: validateInstanceType,
+				Optional:     true,
+				ValidateFunc: validation.StringInSlice([]string{"none", "static"}, false),
 			},
-			"worker_instance_type": &schema.Schema{
+			"proxy_mode": {
 				Type:         schema.TypeString,
-				Required:     true,
-				ValidateFunc: validateInstanceType,
-			},
-			"worker_number": &schema.Schema{
-				Type:         schema.TypeInt,
 				Optional:     true,
-				Default:      3,
-				ValidateFunc: validateIntegerInRange(1, 50),
+				ValidateFunc: validation.StringInSlice([]string{"iptables", "ipvs"}, false),
 			},
-			"password": &schema.Schema{
-				Type:      schema.TypeString,
-				Required:  true,
-				Sensitive: true,
-			},
-			"pod_cidr": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-			},
-			"service_cidr": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-			},
-			"enable_ssh": &schema.Schema{
-				Type:     schema.TypeBool,
-				Optional: true,
-				Default:  false,
-			},
-			"master_disk_size": &schema.Schema{
-				Type:         schema.TypeInt,
-				Optional:     true,
-				Default:      40,
-				ValidateFunc: validateIntegerInRange(40, 500),
-			},
-			"master_disk_category": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Default:  ecs.DiskCategoryCloudEfficiency,
-				ValidateFunc: validateAllowedStringValue([]string{
-					string(ecs.DiskCategoryCloudEfficiency), string(ecs.DiskCategoryCloudSSD)}),
-			},
-			"worker_disk_size": &schema.Schema{
-				Type:         schema.TypeInt,
-				Optional:     true,
-				Default:      40,
-				ValidateFunc: validateIntegerInRange(20, 32768),
-			},
-			"worker_disk_category": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Default:  ecs.DiskCategoryCloudEfficiency,
-				ValidateFunc: validateAllowedStringValue([]string{
-					string(ecs.DiskCategoryCloudEfficiency), string(ecs.DiskCategoryCloudSSD)}),
-			},
-			"install_cloud_monitor": &schema.Schema{
-				Type:     schema.TypeBool,
-				Optional: true,
-				Default:  false,
-			},
-			"is_outdated": &schema.Schema{
-				Type:     schema.TypeBool,
-				Optional: true,
-			},
-			"nodes": &schema.Schema{
+			"addons": {
 				Type:     schema.TypeList,
-				Computed: true,
+				Optional: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
-						"id": {
-							Type:     schema.TypeString,
-							Computed: true,
-						},
 						"name": {
 							Type:     schema.TypeString,
-							Computed: true,
+							Optional: true,
 						},
-						"private_ip": {
+						"config": {
 							Type:     schema.TypeString,
-							Computed: true,
+							Optional: true,
 						},
-						"role": {
-							Type:     schema.TypeString,
-							Computed: true,
-						},
+						// TODO update SDK to support
+						//"disabled": {
+						//	Type:     schema.TypeBool,
+						//	Optional: true,
+						//},
 					},
 				},
 			},
-			"connections": &schema.Schema{
+			"slb_internet_enabled": {
+				Type:             schema.TypeBool,
+				Optional:         true,
+				Default:          true,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+			},
+			// computed parameters
+			"kube_config": {
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			"client_cert": {
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			"client_key": {
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			"cluster_ca_cert": {
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			"connections": {
 				Type:     schema.TypeMap,
 				Computed: true,
 				Elem: &schema.Resource{
@@ -172,80 +392,289 @@ func resourceAlicloudCSKubernetes() *schema.Resource {
 					},
 				},
 			},
-			"slb_id": &schema.Schema{
+			"slb_id": {
 				Type:       schema.TypeString,
 				Computed:   true,
 				Deprecated: "Field 'slb_id' has been deprecated from provider version 1.9.2. New field 'slb_internet' replaces it.",
 			},
-			"slb_internet": &schema.Schema{
+			"slb_internet": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
-			"slb_intranet": &schema.Schema{
+			"slb_intranet": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
-			"security_group_id": &schema.Schema{
+			"security_group_id": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
-			"image_id": &schema.Schema{
+			"nat_gateway_id": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
-			"nat_gateway_id": &schema.Schema{
+			"vpc_id": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
-			"vpc_id": &schema.Schema{
-				Type:     schema.TypeString,
+			"master_nodes": {
+				Type:     schema.TypeList,
 				Computed: true,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"id": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+						"name": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+						"private_ip": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+					},
+				},
+			},
+			"worker_nodes": {
+				Type:     schema.TypeList,
+				Computed: true,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"id": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+						"name": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+						"private_ip": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+					},
+				},
+			},
+			// remove parameters below
+			// mix vswitch_ids between master and worker is not a good guidance to create cluster
+			"worker_instance_type": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Removed:  "Field 'worker_instance_type' has been removed from provider version 1.75.0. New field 'worker_instance_types' replaces it.",
+			},
+			"vswitch_ids": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem: &schema.Schema{
+					Type:         schema.TypeString,
+					ValidateFunc: validation.StringMatch(regexp.MustCompile(`^vsw-[a-z0-9]*$`), "should start with 'vsw-'."),
+				},
+				MinItems:         3,
+				MaxItems:         5,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+				Removed:          "Field 'vswitch_ids' has been removed from provider version 1.75.0. New field 'master_vswitch_ids' and 'worker_vswitch_ids' replace it.",
+			},
+			// single instance type would cause extra troubles
+			"master_instance_type": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Removed:  "Field 'master_instance_type' has been removed from provider version 1.75.0. New field 'master_instance_types' replaces it.",
+			},
+			// force update is a high risk operation
+			"force_update": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  false,
+				Removed:  "Field 'force_update' has been removed from provider version 1.75.0.",
+			},
+			"availability_zone": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Computed: true,
+			},
+			// single az would be never supported.
+			"vswitch_id": {
+				Type:     schema.TypeString,
+				Optional: true,
+				Removed:  "Field 'vswitch_id' has been removed from provider version 1.75.0. New field 'master_vswitch_ids' and 'worker_vswitch_ids' replaces it.",
+			},
+			// worker_numbers in array is a hell of management
+			"worker_numbers": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem: &schema.Schema{
+					Type:    schema.TypeInt,
+					Default: 3,
+				},
+				MinItems:         1,
+				MaxItems:         3,
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+				Removed:          "Field 'worker_numbers' has been removed from provider version 1.75.0. New field 'worker_number' replaces it.",
+			},
+			"nodes": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+				Removed:  "Field 'nodes' has been removed from provider version 1.9.4. New field 'master_nodes' replaces it.",
+			},
+			// too hard to use this config
+			"log_config": {
+				Type:     schema.TypeList,
+				Optional: true,
+				MaxItems: 1,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"type": {
+							Type:         schema.TypeString,
+							ValidateFunc: validation.StringInSlice([]string{KubernetesClusterLoggingTypeSLS}, false),
+							Required:     true,
+						},
+						"project": {
+							Type:     schema.TypeString,
+							Optional: true,
+						},
+					},
+				},
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+				Removed:          "Field 'log_config' has been removed from provider version 1.75.0. New field 'addons' replaces it.",
+			},
+			"cluster_network_type": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				ValidateFunc:     validation.StringInSlice([]string{KubernetesClusterNetworkTypeFlannel, KubernetesClusterNetworkTypeTerway}, false),
+				DiffSuppressFunc: csForceUpdateSuppressFunc,
+				Removed:          "Field 'cluster_network_type' has been removed from provider version 1.75.0. New field 'addons' replaces it.",
 			},
 		},
 	}
 }
 
 func resourceAlicloudCSKubernetesCreate(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*AliyunClient)
-	conn := client.csconn
+	client := meta.(*connectivity.AliyunClient)
+	csService := CsService{client}
+	invoker := NewInvoker()
 
-	args, err := buildKunernetesArgs(d, meta)
+	var requestInfo *cs.Client
+	var raw interface{}
+
+	// prepare args and set default value
+	args, err := buildKubernetesArgs(d, meta)
 	if err != nil {
-		return err
+		return WrapErrorf(err, DefaultErrorMsg, "alicloud_cs_kubernetes", "PrepareKubernetesClusterArgs", err)
 	}
 
-	cluster, err := conn.CreateKubernetesCluster(getRegion(d, meta), args)
+	if err = invoker.Run(func() error {
+		raw, err = client.WithCsClient(func(csClient *cs.Client) (interface{}, error) {
+			args.RegionId = common.Region(client.RegionId)
+			args.ClusterType = cs.DelicatedKubernetes
+			return csClient.CreateDelicatedKubernetesCluster(args)
+		})
+		return err
+	}); err != nil {
+		return WrapErrorf(err, DefaultErrorMsg, "alicloud_cs_kubernetes", "CreateKubernetesCluster", raw)
+	}
 
-	if err != nil {
-		return fmt.Errorf("Creating Kubernetes Cluster got an error: %#v", err)
+	if debugOn() {
+		requestMap := make(map[string]interface{})
+		requestMap["RegionId"] = common.Region(client.RegionId)
+		requestMap["Params"] = args
+		addDebug("CreateKubernetesCluster", raw, requestInfo, requestMap)
+	}
+
+	cluster, ok := raw.(*cs.ClusterCommonResponse)
+	if ok != true {
+		return WrapErrorf(err, DefaultErrorMsg, "alicloud_cs_kubernetes", "ParseKubernetesClusterResponse", raw)
 	}
 
 	d.SetId(cluster.ClusterID)
 
-	if err := conn.WaitForClusterAsyn(cluster.ClusterID, cs.Running, 1800); err != nil {
-		return fmt.Errorf("Waitting for kubernetes cluster %#v got an error: %#v", cs.Running, err)
+	// reset interval to 10s
+	stateConf := BuildStateConf([]string{"initial"}, []string{"running"}, d.Timeout(schema.TimeoutCreate), 10*time.Second, csService.CsKubernetesInstanceStateRefreshFunc(d.Id(), []string{"deleting", "failed"}))
+	if _, err := stateConf.WaitForState(); err != nil {
+		return WrapErrorf(err, IdMsg, d.Id())
 	}
 
 	return resourceAlicloudCSKubernetesUpdate(d, meta)
 }
 
 func resourceAlicloudCSKubernetesUpdate(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).csconn
+	client := meta.(*connectivity.AliyunClient)
+	csService := CsService{client}
 	d.Partial(true)
+	invoker := NewInvoker()
 	if d.HasChange("worker_number") && !d.IsNewResource() {
-		// Ensure instance_type is generation three
-		args, err := buildKunernetesArgs(d, meta)
-		if err != nil {
+		password := d.Get("password").(string)
+		if password == "" {
+			if v := d.Get("kms_encrypted_password").(string); v != "" {
+				kmsService := KmsService{client}
+				decryptResp, err := kmsService.Decrypt(v, d.Get("kms_encryption_context").(map[string]interface{}))
+				if err != nil {
+					return WrapError(err)
+				}
+				password = decryptResp.Plaintext
+			}
+		}
+
+		keyPair := d.Get("key_name").(string)
+
+		oldV, newV := d.GetChange("worker_number")
+
+		oldValue, ok := oldV.(int)
+		if ok != true {
+			return WrapErrorf(fmt.Errorf("worker_number old value can not be parsed"), "parseError %d", oldValue)
+		}
+		newValue, ok := newV.(int)
+		if ok != true {
+			return WrapErrorf(fmt.Errorf("worker_number new value can not be parsed"), "parseError %d", newValue)
+		}
+
+		if newValue < oldValue {
+			return WrapErrorf(fmt.Errorf("worker_number can not be less than before"), "scaleOutFailed %d:%d", newValue, oldValue)
+		}
+
+		args := &cs.ScaleOutKubernetesClusterRequest{
+			KeyPair:             keyPair,
+			LoginPassword:       password,
+			ImageId:             d.Get("image_id").(string),
+			Count:               int64(newValue) - int64(oldValue),
+			WorkerVSwitchIds:    expandStringList(d.Get("worker_vswitch_ids").([]interface{})),
+			WorkerInstanceTypes: expandStringList(d.Get("worker_instance_types").([]interface{})),
+		}
+
+		if v, ok := d.GetOk("worker_instance_charge_type"); ok {
+			args.WorkerInstanceChargeType = v.(string)
+			if args.WorkerInstanceChargeType == string(PrePaid) {
+				args.WorkerAutoRenew = d.Get("worker_auto_renew").(bool)
+				args.WorkerAutoRenewPeriod = d.Get("worker_auto_renew_period").(int)
+				args.WorkerPeriod = d.Get("worker_period").(int)
+				args.WorkerPeriodUnit = d.Get("worker_period_unit").(string)
+			}
+		}
+
+		var resoponse interface{}
+		if err := invoker.Run(func() error {
+			var err error
+			resoponse, err = client.WithCsClient(func(csClient *cs.Client) (interface{}, error) {
+				resp, err := csClient.ScaleOutKubernetesCluster(d.Id(), args)
+				return resp, err
+			})
 			return err
+		}); err != nil {
+			return WrapErrorf(err, DefaultErrorMsg, d.Id(), "ResizeKubernetesCluster", DenverdinoAliyungo)
 		}
-		if err := conn.ResizeKubernetes(d.Id(), args); err != nil {
-			return fmt.Errorf("Resize Cluster got an error: %#v", err)
+		if debugOn() {
+			resizeRequestMap := make(map[string]interface{})
+			resizeRequestMap["ClusterId"] = d.Id()
+			resizeRequestMap["Args"] = args
+			addDebug("ResizeKubernetesCluster", resoponse, resizeRequestMap)
 		}
 
-		err = conn.WaitForClusterAsyn(d.Id(), cs.Running, 500)
+		stateConf := BuildStateConf([]string{"scaling"}, []string{"running"}, d.Timeout(schema.TimeoutUpdate), 10*time.Second, csService.CsKubernetesInstanceStateRefreshFunc(d.Id(), []string{"deleting", "failed"}))
 
-		if err != nil {
-			return fmt.Errorf("Waitting for container Cluster %#v got an error: %#v", cs.Running, err)
+		if _, err := stateConf.WaitForState(); err != nil {
+			return WrapErrorf(err, IdMsg, d.Id())
 		}
 		d.SetPartial("worker_number")
 	}
@@ -257,61 +686,115 @@ func resourceAlicloudCSKubernetesUpdate(d *schema.ResourceData, meta interface{}
 		} else {
 			clusterName = resource.PrefixedUniqueId(d.Get("name_prefix").(string))
 		}
-		if err := conn.ModifyClusterName(d.Id(), clusterName); err != nil && !IsExceptedError(err, ErrorClusterNameAlreadyExist) {
-			return fmt.Errorf("Modify Cluster Name got an error: %#v", err)
+		var requestInfo *cs.Client
+		var response interface{}
+		if err := invoker.Run(func() error {
+			raw, err := client.WithCsClient(func(csClient *cs.Client) (interface{}, error) {
+				requestInfo = csClient
+				return nil, csClient.ModifyClusterName(d.Id(), clusterName)
+			})
+			response = raw
+			return err
+		}); err != nil && !IsExpectedErrors(err, []string{"ErrorClusterNameAlreadyExist"}) {
+			return WrapErrorf(err, DefaultErrorMsg, d.Id(), "ModifyClusterName", DenverdinoAliyungo)
+		}
+		if debugOn() {
+			requestMap := make(map[string]interface{})
+			requestMap["ClusterId"] = d.Id()
+			requestMap["ClusterName"] = clusterName
+			addDebug("ModifyClusterName", response, requestInfo, requestMap)
 		}
 		d.SetPartial("name")
 		d.SetPartial("name_prefix")
 	}
-	d.Partial(false)
 
+	UpgradeAlicloudKubernetesCluster(d, meta)
+	d.Partial(false)
 	return resourceAlicloudCSKubernetesRead(d, meta)
 }
 
 func resourceAlicloudCSKubernetesRead(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*AliyunClient)
-
-	cluster, err := client.csconn.DescribeCluster(d.Id())
-
+	client := meta.(*connectivity.AliyunClient)
+	csService := CsService{client}
+	invoker := NewInvoker()
+	object, err := csService.DescribeCsKubernetes(d.Id())
 	if err != nil {
-		if NotFoundError(err) || IsExceptedError(err, ErrorClusterNotFound) {
+		if NotFoundError(err) {
 			d.SetId("")
 			return nil
 		}
-		return err
+		return WrapError(err)
 	}
 
-	d.Set("name", cluster.Name)
-	// Each k8s cluster contains 3 master nodes
-	d.Set("worker_number", cluster.Size-KubernetesMasterNumber)
-	d.Set("vswitch_id", cluster.VSwitchID)
-	d.Set("vpc_id", cluster.VPCID)
-	d.Set("security_group_id", cluster.SecurityGroupID)
+	d.Set("name", object.Name)
+	d.Set("vpc_id", object.VpcId)
+	d.Set("security_group_id", object.SecurityGroupId)
+	d.Set("version", object.CurrentVersion)
 
-	var nodes []map[string]interface{}
-	var master, worker cs.KubernetesNodeType
+	var masterNodes []map[string]interface{}
+	var workerNodes []map[string]interface{}
 
 	pageNumber := 1
 	for {
-		result, pagination, err := client.csconn.GetKubernetesClusterNodes(d.Id(), common.Pagination{PageNumber: pageNumber, PageSize: 50})
-		if err != nil {
-			return fmt.Errorf("[ERROR] GetKubernetesClusterNodes got an error: %#v.", err)
+		var result []cs.KubernetesNodeType
+		var pagination *cs.PaginationResult
+		var requestInfo *cs.Client
+		var response interface{}
+		if err := invoker.Run(func() error {
+			raw, err := client.WithCsClient(func(csClient *cs.Client) (interface{}, error) {
+				requestInfo = csClient
+				nodes, paginationResult, err := csClient.GetKubernetesClusterNodes(d.Id(), common.Pagination{PageNumber: pageNumber, PageSize: PageSizeLarge})
+				return []interface{}{nodes, paginationResult}, err
+			})
+			response = raw
+			return err
+		}); err != nil {
+			return WrapErrorf(err, DefaultErrorMsg, d.Id(), "GetKubernetesClusterNodes", DenverdinoAliyungo)
 		}
+		if debugOn() {
+			requestMap := make(map[string]interface{})
+			requestMap["ClusterId"] = d.Id()
+			requestMap["Pagination"] = common.Pagination{PageNumber: pageNumber, PageSize: PageSizeLarge}
+			addDebug("GetKubernetesClusterNodes", response, requestInfo, requestMap)
+		}
+		result, _ = response.([]interface{})[0].([]cs.KubernetesNodeType)
+		pagination, _ = response.([]interface{})[1].(*cs.PaginationResult)
 
-		if pageNumber == 1 && (pagination.TotalCount == 0 || result[0].InstanceId == "") {
-			err := resource.Retry(2*time.Minute, func() *resource.RetryError {
-				tmp, pagination, err := client.csconn.GetKubernetesClusterNodes(d.Id(), common.Pagination{PageNumber: pageNumber, PageSize: 50})
-				if err != nil {
-					return resource.NonRetryableError(fmt.Errorf("[ERROR] GetKubernetesClusterNodes got an error: %#v.", err))
+		if pageNumber == 1 && (len(result) == 0 || result[0].InstanceId == "") {
+			err := resource.Retry(5*time.Minute, func() *resource.RetryError {
+				if err := invoker.Run(func() error {
+					raw, err := client.WithCsClient(func(csClient *cs.Client) (interface{}, error) {
+						requestInfo = csClient
+						nodes, _, err := csClient.GetKubernetesClusterNodes(d.Id(), common.Pagination{PageNumber: pageNumber, PageSize: PageSizeLarge})
+						return nodes, err
+					})
+					response = raw
+					return err
+				}); err != nil {
+					return resource.NonRetryableError(err)
 				}
-				if pagination.TotalCount > 0 && result[0].InstanceId != "" {
+				tmp, _ := response.([]cs.KubernetesNodeType)
+				if len(tmp) > 0 && tmp[0].InstanceId != "" {
 					result = tmp
-					return nil
 				}
-				return resource.RetryableError(fmt.Errorf("[ERROR] There is no any nodes in kubernetes cluster %s.", d.Id()))
+
+				for _, stableState := range cs.NodeStableClusterState {
+					// If cluster is in NodeStableClusteState, node list will not change
+					if object.State == string(stableState) {
+						if debugOn() {
+							requestMap := make(map[string]interface{})
+							requestMap["ClusterId"] = d.Id()
+							requestMap["Pagination"] = common.Pagination{PageNumber: pageNumber, PageSize: PageSizeLarge}
+							addDebug("GetKubernetesClusterNodes", response, requestInfo, requestMap)
+						}
+						return nil
+					}
+				}
+				time.Sleep(5 * time.Second)
+				return resource.RetryableError(Error("[ERROR] There is no any nodes in kubernetes cluster %s.", d.Id()))
 			})
 			if err != nil {
-				return err
+				return WrapErrorf(err, DefaultErrorMsg, d.Id(), "GetKubernetesClusterNodes", DenverdinoAliyungo)
 			}
 
 		}
@@ -321,127 +804,197 @@ func resourceAlicloudCSKubernetesRead(d *schema.ResourceData, meta interface{}) 
 				"id":         node.InstanceId,
 				"name":       node.InstanceName,
 				"private_ip": node.IpAddress[0],
-				"role":       node.InstanceRole,
 			}
-			nodes = append(nodes, mapping)
-			if master.InstanceId == "" && node.InstanceRole == "Master" {
-				master = node
-			} else if worker.InstanceId == "" && node.InstanceRole == "Worker" {
-				worker = node
+			if node.InstanceRole == "Master" {
+				masterNodes = append(masterNodes, mapping)
+			} else {
+				workerNodes = append(workerNodes, mapping)
 			}
 		}
 
-		if pagination.TotalCount < pagination.PageSize {
+		if len(result) < pagination.PageSize {
 			break
 		}
 		pageNumber += 1
 	}
-	d.Set("nodes", nodes)
 
-	d.Set("master_instance_type", master.InstanceType)
-	if disks, _, err := client.ecsconn.DescribeDisks(&ecs.DescribeDisksArgs{
-		RegionId:   getRegion(d, meta),
-		InstanceId: master.InstanceId,
-		DiskType:   ecs.DiskTypeAllSystem,
-	}); err != nil {
-		return fmt.Errorf("[ERROR] DescribeDisks By Id %s: %#v.", master.InstanceId, err)
-	} else if len(disks) > 0 {
-		d.Set("master_disk_size", disks[0].Size)
-		d.Set("master_disk_category", disks[0].Category)
-		d.Set("availability_zone", disks[0].ZoneId)
-	}
-
-	d.Set("worker_instance_type", worker.InstanceType)
-	if disks, _, err := client.ecsconn.DescribeDisks(&ecs.DescribeDisksArgs{
-		RegionId:   getRegion(d, meta),
-		InstanceId: worker.InstanceId,
-		DiskType:   ecs.DiskTypeAllSystem,
-	}); err != nil {
-		return fmt.Errorf("[ERROR] DescribeDisks By Id %s: %#v.", worker.InstanceId, err)
-	} else if len(disks) > 0 {
-		d.Set("worker_disk_size", disks[0].Size)
-		d.Set("worker_disk_category", disks[0].Category)
-	}
-
-	if cluster.SecurityGroupID == "" {
-		if inst, err := client.QueryInstancesById(worker.InstanceId); err != nil {
-			return fmt.Errorf("[ERROR] QueryInstanceById %s got an error: %#v.", worker.InstanceId, err)
-		} else {
-			d.Set("security_group_id", inst.SecurityGroupIds.SecurityGroupId[0])
-		}
-	}
+	d.Set("master_nodes", masterNodes)
+	d.Set("worker_nodes", workerNodes)
+	d.Set("worker_number", object.Size-int64(len(masterNodes)))
 
 	// Get slb information
 	connection := make(map[string]string)
-	lbs, err := client.slbconn.DescribeLoadBalancers(&slb.DescribeLoadBalancersArgs{
-		RegionId: getRegion(d, meta),
-		ServerId: master.InstanceId,
-	})
-	if err != nil {
-		return fmt.Errorf("[ERROR] DescribeLoadBalancers by server id %s got an error: %#v.", worker.InstanceId, err)
-	}
-	for _, lb := range lbs {
-		if lb.AddressType == slb.InternetAddressType {
-			d.Set("slb_internet", lb.LoadBalancerId)
-			connection["api_server_internet"] = fmt.Sprintf("https://%s:6443", lb.Address)
-			connection["master_public_ip"] = lb.Address
-		} else {
-			d.Set("slb_intranet", lb.LoadBalancerId)
-			connection["api_server_intranet"] = fmt.Sprintf("https://%s:6443", lb.Address)
+
+	if len(masterNodes) != 0 {
+		request := slb.CreateDescribeLoadBalancersRequest()
+		request.ServerId = masterNodes[0]["id"].(string)
+		raw, err := client.WithSlbClient(func(slbClient *slb.Client) (interface{}, error) {
+			return slbClient.DescribeLoadBalancers(request)
+		})
+		if err != nil {
+			return WrapErrorf(err, DefaultErrorMsg, d.Id(), request.GetActionName(), AlibabaCloudSdkGoERROR)
+		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		lbs, _ := raw.(*slb.DescribeLoadBalancersResponse)
+		for _, lb := range lbs.LoadBalancers.LoadBalancer {
+			if strings.ToLower(lb.AddressType) == strings.ToLower(string(Internet)) {
+				d.Set("slb_internet", lb.LoadBalancerId)
+				connection["api_server_internet"] = fmt.Sprintf("https://%s:6443", lb.Address)
+				connection["master_public_ip"] = lb.Address
+			} else {
+				d.Set("slb_intranet", lb.LoadBalancerId)
+				connection["api_server_intranet"] = fmt.Sprintf("https://%s:6443", lb.Address)
+
+				reqVpc := vpc.CreateDescribeEipAddressesRequest()
+				reqVpc.AssociatedInstanceId = lb.LoadBalancerId
+				reqVpc.AssociatedInstanceType = "SlbInstance"
+				raw, err = client.WithVpcClient(func(vpcClient *vpc.Client) (interface{}, error) {
+					return vpcClient.DescribeEipAddresses(reqVpc)
+				})
+				eip, _ := raw.(*vpc.DescribeEipAddressesResponse)
+				if eip != nil && len(eip.EipAddresses.EipAddress) > 0 {
+					eipAddr := eip.EipAddresses.EipAddress[0].IpAddress
+					connection["master_public_ip"] = eipAddr
+					connection["api_server_internet"] = fmt.Sprintf("https://%s:6443", eipAddr)
+				}
+			}
 		}
 	}
-	connection["service_domain"] = fmt.Sprintf("*.%s.%s.alicontainer.com", d.Id(), cluster.RegionID)
+
+	connection["service_domain"] = fmt.Sprintf("*.%s.%s.alicontainer.com", d.Id(), object.RegionId)
 
 	d.Set("connections", connection)
-	req := vpc.CreateDescribeNatGatewaysRequest()
-	req.VpcId = cluster.VPCID
-	if nat, err := client.vpcconn.DescribeNatGateways(req); err != nil {
-		return fmt.Errorf("[ERROR] DescribeNatGateways by VPC Id %s: %#v.", cluster.VPCID, err)
-	} else if nat != nil {
+	natRequest := vpc.CreateDescribeNatGatewaysRequest()
+	natRequest.VpcId = object.VpcId
+	raw, err := client.WithVpcClient(func(vpcClient *vpc.Client) (interface{}, error) {
+		return vpcClient.DescribeNatGateways(natRequest)
+	})
+	if err != nil {
+		return WrapErrorf(err, DefaultErrorMsg, d.Id(), natRequest.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	addDebug(natRequest.GetActionName(), raw, natRequest.RpcRequest, natRequest)
+	nat, _ := raw.(*vpc.DescribeNatGatewaysResponse)
+	if nat != nil && len(nat.NatGateways.NatGateway) > 0 {
 		d.Set("nat_gateway_id", nat.NatGateways.NatGateway[0].NatGatewayId)
+	}
+
+	var requestInfo *cs.Client
+	var response interface{}
+	if err := invoker.Run(func() error {
+		raw, err := client.WithCsClient(func(csClient *cs.Client) (interface{}, error) {
+			requestInfo = csClient
+			return csClient.GetClusterCerts(d.Id())
+		})
+		response = raw
+		return err
+	}); err != nil {
+		return WrapErrorf(err, DefaultErrorMsg, d.Id(), "GetClusterCerts", DenverdinoAliyungo)
+	}
+	if debugOn() {
+		requestMap := make(map[string]interface{})
+		requestMap["Id"] = d.Id()
+		addDebug("GetClusterCerts", response, requestInfo, requestMap)
+	}
+	cert, _ := response.(cs.ClusterCerts)
+	if ce, ok := d.GetOk("client_cert"); ok && ce.(string) != "" {
+		if err := writeToFile(ce.(string), cert.Cert); err != nil {
+			return WrapError(err)
+		}
+	}
+	if key, ok := d.GetOk("client_key"); ok && key.(string) != "" {
+		if err := writeToFile(key.(string), cert.Key); err != nil {
+			return WrapError(err)
+		}
+	}
+	if ca, ok := d.GetOk("cluster_ca_cert"); ok && ca.(string) != "" {
+		if err := writeToFile(ca.(string), cert.CA); err != nil {
+			return WrapError(err)
+		}
+	}
+
+	var config cs.ClusterConfig
+	if file, ok := d.GetOk("kube_config"); ok && file.(string) != "" {
+		if err := invoker.Run(func() error {
+			raw, err := client.WithCsClient(func(csClient *cs.Client) (interface{}, error) {
+				requestInfo = csClient
+				return csClient.GetClusterConfig(d.Id())
+			})
+			response = raw
+			return err
+		}); err != nil {
+			return WrapErrorf(err, DefaultErrorMsg, d.Id(), "GetClusterConfig", DenverdinoAliyungo)
+		}
+		if debugOn() {
+			requestMap := make(map[string]interface{})
+			requestMap["Id"] = d.Id()
+			addDebug("GetClusterConfig", response, requestInfo, requestMap)
+		}
+		config, _ = response.(cs.ClusterConfig)
+
+		if err := writeToFile(file.(string), config.Config); err != nil {
+			return WrapError(err)
+		}
 	}
 
 	return nil
 }
 
 func resourceAlicloudCSKubernetesDelete(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).csconn
+	client := meta.(*connectivity.AliyunClient)
+	csService := CsService{client}
+	invoker := NewInvoker()
 
-	return resource.Retry(5*time.Minute, func() *resource.RetryError {
-		err := conn.DeleteCluster(d.Id())
-		if err != nil {
-			if NotFoundError(err) || IsExceptedError(err, ErrorClusterNotFound) {
-				return nil
-			}
-			return resource.RetryableError(fmt.Errorf("Delete Kubernetes Cluster timeout and get an error: %#v.", err))
+	var response interface{}
+	err := resource.Retry(30*time.Minute, func() *resource.RetryError {
+		if err := invoker.Run(func() error {
+			raw, err := client.WithCsClient(func(csClient *cs.Client) (interface{}, error) {
+				return nil, csClient.DeleteKubernetesCluster(d.Id())
+			})
+			response = raw
+			return err
+		}); err != nil {
+			return resource.RetryableError(err)
 		}
-
-		resp, err := conn.DescribeCluster(d.Id())
-		if err != nil {
-			if NotFoundError(err) || IsExceptedError(err, ErrorClusterNotFound) {
-				return nil
-			}
-			return resource.NonRetryableError(fmt.Errorf("Describing Kubernetes Cluster got an error: %#v", err))
+		if debugOn() {
+			requestMap := make(map[string]interface{})
+			requestMap["ClusterId"] = d.Id()
+			addDebug("DeleteCluster", response, d.Id(), requestMap)
 		}
-		if resp.ClusterID == "" {
+		return nil
+	})
+	if err != nil {
+		if IsExpectedErrors(err, []string{"ErrorClusterNotFound"}) {
 			return nil
 		}
+		return WrapErrorf(err, DefaultErrorMsg, d.Id(), "DeleteCluster", DenverdinoAliyungo)
+	}
 
-		if string(resp.State) == string(Deleting) {
-			time.Sleep(5 * time.Second)
-		}
-
-		return resource.RetryableError(fmt.Errorf("Delete Kubernetes Cluster timeout and get an error: %#v.", err))
-	})
+	stateConf := BuildStateConf([]string{"running", "deleting"}, []string{}, d.Timeout(schema.TimeoutDelete), 10*time.Second, csService.CsKubernetesInstanceStateRefreshFunc(d.Id(), []string{}))
+	if _, err := stateConf.WaitForState(); err != nil {
+		return WrapErrorf(err, IdMsg, d.Id())
+	}
+	return nil
 }
 
-func buildKunernetesArgs(d *schema.ResourceData, meta interface{}) (*cs.KubernetesCreationArgs, error) {
-	client := meta.(*AliyunClient)
+func buildKubernetesArgs(d *schema.ResourceData, meta interface{}) (*cs.DelicatedKubernetesClusterCreationRequest, error) {
+	client := meta.(*connectivity.AliyunClient)
 
-	// Ensure instance_type is generation three
-	_, err := client.CheckParameterValidity(d, meta)
-	if err != nil {
-		return nil, err
+	vpcService := VpcService{client}
+
+	var vswitchID string
+	if list := expandStringList(d.Get("worker_vswitch_ids").([]interface{})); len(list) > 0 {
+		vswitchID = list[0]
+	} else {
+		vswitchID = ""
+	}
+
+	var vpcId string
+	if vswitchID != "" {
+		vsw, err := vpcService.DescribeVSwitch(vswitchID)
+		if err != nil {
+			return nil, err
+		}
+		vpcId = vsw.VpcId
 	}
 
 	var clusterName string
@@ -451,48 +1004,120 @@ func buildKunernetesArgs(d *schema.ResourceData, meta interface{}) (*cs.Kubernet
 		clusterName = resource.PrefixedUniqueId(d.Get("name_prefix").(string))
 	}
 
-	stackArgs := &cs.KubernetesStackArgs{
-		MasterInstanceType:       d.Get("master_instance_type").(string),
-		WorkerInstanceType:       d.Get("worker_instance_type").(string),
-		Password:                 d.Get("password").(string),
-		NumOfNodes:               int64(d.Get("worker_number").(int)),
-		MasterSystemDiskCategory: ecs.DiskCategory(d.Get("master_disk_category").(string)),
-		MasterSystemDiskSize:     int64(d.Get("master_disk_size").(int)),
-		WorkerSystemDiskCategory: ecs.DiskCategory(d.Get("worker_disk_category").(string)),
-		WorkerSystemDiskSize:     int64(d.Get("worker_disk_size").(int)),
-		SNatEntry:                d.Get("new_nat_gateway").(bool),
-		KubernetesVersion:        KubernetesVersion,
-		DockerVersion:            KubernetesDockerVersion,
-		ContainerCIDR:            d.Get("pod_cidr").(string),
-		ServiceCIDR:              d.Get("service_cidr").(string),
-		SSHFlags:                 d.Get("enable_ssh").(bool),
-		ImageID:                  KubernetesImageId,
-		CloudMonitorFlags:        d.Get("install_cloud_monitor").(bool),
-	}
-	if v, ok := d.GetOk("availability_zone"); ok && len(Trim(v.(string))) > 0 {
-		stackArgs.ZoneId = Trim(v.(string))
-	}
-	if v, ok := d.GetOk("vswitch_id"); ok && len(Trim(v.(string))) > 0 {
-		stackArgs.VSwitchID = Trim(v.(string))
-		vsw, err := client.DescribeVswitch(stackArgs.VSwitchID)
-		if err != nil {
-			return nil, err
+	addons := make([]cs.Addon, 0)
+	if v, ok := d.GetOk("addons"); ok {
+		all, ok := v.([]interface{})
+		if ok {
+			for _, a := range all {
+				addon, ok := a.(map[string]interface{})
+				if ok {
+					addons = append(addons, cs.Addon{
+						Name:   addon["name"].(string),
+						Config: addon["config"].(string),
+					})
+				}
+			}
 		}
-		stackArgs.VPCID = vsw.VpcId
-		if stackArgs.ZoneId != "" && vsw.ZoneId != vsw.ZoneId {
-			return nil, fmt.Errorf("The specified vswitch %s isn't in the zone %s.", vsw.VSwitchId, stackArgs.ZoneId)
-		}
-		stackArgs.ZoneId = vsw.ZoneId
-	} else if !stackArgs.SNatEntry {
-		return nil, fmt.Errorf("The automatic created VPC and VSwitch must set 'new_nat_gateway' to 'true'.")
 	}
 
-	return &cs.KubernetesCreationArgs{
-		Name:              clusterName,
-		ClusterType:       "Kubernetes",
-		DisableRollback:   true,
-		TimeoutMins:       30,
-		KubernetesVersion: stackArgs.KubernetesVersion,
-		StackParams:       *stackArgs,
-	}, nil
+	creationArgs := &cs.DelicatedKubernetesClusterCreationRequest{
+		ClusterArgs: cs.ClusterArgs{
+			DisableRollback: true,
+			Name:            clusterName,
+			// TODO add windows and other platform support
+			OsType:   "Linux",
+			Platform: "CentOS",
+			VpcId:    vpcId,
+
+			// the params below is ok to be empty
+			KubernetesVersion:    d.Get("version").(string),
+			NodeCidrMask:         strconv.Itoa(d.Get("node_cidr_mask").(int)),
+			ImageId:              d.Get("image_id").(string),
+			KeyPair:              d.Get("key_name").(string),
+			ServiceCidr:          d.Get("service_cidr").(string),
+			CloudMonitorFlags:    d.Get("install_cloud_monitor").(bool),
+			SecurityGroupId:      d.Get("security_group_id").(string),
+			EndpointPublicAccess: d.Get("slb_internet_enabled").(bool),
+			SnatEntry:            d.Get("new_nat_gateway").(bool),
+			Addons:               addons,
+		},
+	}
+
+	if _, ok := d.GetOk("pod_vswitch_ids"); ok {
+		creationArgs.PodVswitchIds = expandStringList(d.Get("pod_vswitch_ids").([]interface{}))
+	} else {
+		creationArgs.ContainerCidr = d.Get("pod_cidr").(string)
+	}
+
+	if password := d.Get("password").(string); password == "" {
+		if v := d.Get("kms_encrypted_password").(string); v != "" {
+			kmsService := KmsService{client}
+			decryptResp, err := kmsService.Decrypt(v, d.Get("kms_encryption_context").(map[string]interface{}))
+			if err != nil {
+				return nil, WrapError(err)
+			}
+			password = decryptResp.Plaintext
+		}
+		creationArgs.LoginPassword = password
+	} else {
+		creationArgs.LoginPassword = password
+	}
+
+	// CA default is empty
+	if userCa, ok := d.GetOk("user_ca"); ok {
+		userCaContent, err := loadFileContent(userCa.(string))
+		if err != nil {
+			return nil, fmt.Errorf("reading user_ca file failed %s", err)
+		}
+		creationArgs.UserCa = string(userCaContent)
+	}
+
+	// set proxy mode and default is ipvs
+	if proxyMode := d.Get("proxy_mode").(string); proxyMode != "" {
+		creationArgs.ProxyMode = cs.ProxyMode(proxyMode)
+	} else {
+		creationArgs.ProxyMode = cs.ProxyMode(cs.IPVS)
+	}
+
+	// dedicated kubernetes must provide master_vswitch_ids
+	if _, ok := d.GetOk("master_vswitch_ids"); ok {
+		creationArgs.MasterArgs = cs.MasterArgs{
+			MasterCount:              len(d.Get("master_vswitch_ids").([]interface{})),
+			MasterVSwitchIds:         expandStringList(d.Get("master_vswitch_ids").([]interface{})),
+			MasterInstanceTypes:      expandStringList(d.Get("master_instance_types").([]interface{})),
+			MasterSystemDiskCategory: d.Get("master_disk_category").(string),
+			MasterSystemDiskSize:     int64(d.Get("master_disk_size").(int)),
+			// TODO support other params
+		}
+	}
+
+	if v, ok := d.GetOk("master_instance_charge_type"); ok {
+		creationArgs.MasterInstanceChargeType = v.(string)
+		if creationArgs.MasterInstanceChargeType == string(PrePaid) {
+			creationArgs.MasterAutoRenew = d.Get("master_auto_renew").(bool)
+			creationArgs.MasterAutoRenewPeriod = d.Get("master_auto_renew_period").(int)
+			creationArgs.MasterPeriod = d.Get("master_period").(int)
+			creationArgs.MasterPeriodUnit = d.Get("master_period_unit").(string)
+		}
+	}
+
+	creationArgs.WorkerArgs = cs.WorkerArgs{
+		WorkerVSwitchIds:         expandStringList(d.Get("worker_vswitch_ids").([]interface{})),
+		WorkerInstanceTypes:      expandStringList(d.Get("worker_instance_types").([]interface{})),
+		NumOfNodes:               int64(d.Get("worker_number").(int)),
+		WorkerSystemDiskCategory: d.Get("worker_disk_category").(string),
+		WorkerSystemDiskSize:     int64(d.Get("worker_disk_size").(int)),
+		// TODO support other params
+	}
+
+	if v, ok := d.GetOk("worker_instance_charge_type"); ok {
+		creationArgs.WorkerInstanceChargeType = v.(string)
+		if creationArgs.WorkerInstanceChargeType == string(PrePaid) {
+			creationArgs.WorkerAutoRenew = d.Get("worker_auto_renew").(bool)
+			creationArgs.WorkerAutoRenewPeriod = d.Get("worker_auto_renew_period").(int)
+			creationArgs.WorkerPeriod = d.Get("worker_period").(int)
+			creationArgs.WorkerPeriodUnit = d.Get("worker_period_unit").(string)
+		}
+	}
+	return creationArgs, nil
 }

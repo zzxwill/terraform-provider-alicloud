@@ -1,12 +1,12 @@
 package alicloud
 
 import (
-	"fmt"
-	"log"
 	"regexp"
 
-	"github.com/denverdino/aliyungo/dns"
-	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/alidns"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 func dataSourceAlicloudDnsGroups() *schema.Resource {
@@ -19,12 +19,23 @@ func dataSourceAlicloudDnsGroups() *schema.Resource {
 				Optional: true,
 				ForceNew: true,
 			},
+			"ids": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+				Computed: true,
+			},
 			"output_file": {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
 
 			// Computed values
+			"names": {
+				Type:     schema.TypeList,
+				Computed: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+			},
 			"groups": {
 				Type:     schema.TypeList,
 				Computed: true,
@@ -46,27 +57,49 @@ func dataSourceAlicloudDnsGroups() *schema.Resource {
 }
 
 func dataSourceAlicloudDnsGroupsRead(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).dnsconn
+	client := meta.(*connectivity.AliyunClient)
 
-	args := &dns.DescribeDomainGroupsArgs{}
+	request := alidns.CreateDescribeDomainGroupsRequest()
 
-	var allGroups []dns.DomainGroupType
-	pagination := getPagination(1, 50)
-	for {
-		args.Pagination = pagination
-		groups, err := conn.DescribeDomainGroups(args)
-		if err != nil {
-			return err
+	var allGroups []alidns.DomainGroup
+	request.RegionId = client.RegionId
+	request.PageSize = requests.NewInteger(PageSizeLarge)
+	request.PageNumber = requests.NewInteger(1)
+	idsMap := make(map[string]string)
+	if v, ok := d.GetOk("ids"); ok {
+		for _, vv := range v.([]interface{}) {
+			idsMap[vv.(string)] = vv.(string)
 		}
-		allGroups = append(allGroups, groups...)
-
-		if len(groups) < pagination.PageSize {
+	}
+	for {
+		raw, err := client.WithDnsClient(func(dnsClient *alidns.Client) (interface{}, error) {
+			return dnsClient.DescribeDomainGroups(request)
+		})
+		if err != nil {
+			return WrapErrorf(err, DataDefaultErrorMsg, "alicloud_dns_groups", request.GetActionName(), AlibabaCloudSdkGoERROR)
+		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		response, _ := raw.(*alidns.DescribeDomainGroupsResponse)
+		groups := response.DomainGroups.DomainGroup
+		for _, domainGroup := range groups {
+			if len(idsMap) > 0 {
+				if _, ok := idsMap[domainGroup.GroupId]; !ok {
+					continue
+				}
+			}
+			allGroups = append(allGroups, domainGroup)
+		}
+		if len(groups) < PageSizeLarge {
 			break
 		}
-		pagination.PageNumber += 1
+		if page, err := getNextpageNumber(request.PageNumber); err != nil {
+			return WrapError(err)
+		} else {
+			request.PageNumber = page
+		}
 	}
 
-	var filteredGroups []dns.DomainGroupType
+	var filteredGroups []alidns.DomainGroup
 	if v, ok := d.GetOk("name_regex"); ok && v.(string) != "" {
 		r := regexp.MustCompile(v.(string))
 
@@ -79,31 +112,32 @@ func dataSourceAlicloudDnsGroupsRead(d *schema.ResourceData, meta interface{}) e
 		filteredGroups = allGroups[:]
 	}
 
-	if len(filteredGroups) < 1 {
-		return fmt.Errorf("Your query returned no results. Please change your search criteria and try again.")
-	}
-
-	log.Printf("[DEBUG] alicloud_dns_groups - Groups found: %#v", allGroups)
-
 	return groupsDecriptionAttributes(d, filteredGroups, meta)
 }
 
-func groupsDecriptionAttributes(d *schema.ResourceData, groupTypes []dns.DomainGroupType, meta interface{}) error {
+func groupsDecriptionAttributes(d *schema.ResourceData, groupTypes []alidns.DomainGroup, meta interface{}) error {
 	var ids []string
+	var names []string
 	var s []map[string]interface{}
 	for _, group := range groupTypes {
 		mapping := map[string]interface{}{
 			"group_id":   group.GroupId,
 			"group_name": group.GroupName,
 		}
-		log.Printf("[DEBUG] alicloud_dns_groups - adding group: %v", mapping)
 		ids = append(ids, group.GroupId)
+		names = append(names, group.GroupName)
 		s = append(s, mapping)
 	}
 
 	d.SetId(dataResourceIdHash(ids))
 	if err := d.Set("groups", s); err != nil {
-		return err
+		return WrapError(err)
+	}
+	if err := d.Set("ids", ids); err != nil {
+		return WrapError(err)
+	}
+	if err := d.Set("names", names); err != nil {
+		return WrapError(err)
 	}
 
 	// create a json file in current directory and write data source to it.

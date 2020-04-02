@@ -1,12 +1,11 @@
 package alicloud
 
 import (
-	"fmt"
-	"time"
-
-	"github.com/denverdino/aliyungo/ram"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/ram"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+	"github.com/hashicorp/terraform/helper/encryption"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 func resourceAlicloudRamAccessKey() *schema.Resource {
@@ -17,136 +16,147 @@ func resourceAlicloudRamAccessKey() *schema.Resource {
 		Delete: resourceAlicloudRamAccessKeyDelete,
 
 		Schema: map[string]*schema.Schema{
-			"user_name": &schema.Schema{
-				Type:         schema.TypeString,
-				Optional:     true,
-				ForceNew:     true,
-				ValidateFunc: validateRamName,
-			},
-			"secret_file": &schema.Schema{
+			"user_name": {
 				Type:     schema.TypeString,
 				Optional: true,
 				ForceNew: true,
 			},
-			"status": &schema.Schema{
+			"secret_file": {
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+			},
+			"status": {
 				Type:         schema.TypeString,
 				Optional:     true,
-				Default:      "Active",
-				ValidateFunc: validateRamAKStatus,
+				Default:      Active,
+				ValidateFunc: validation.StringInSlice([]string{"Active", "Inactive"}, false),
+			},
+			"pgp_key": {
+				Type:     schema.TypeString,
+				ForceNew: true,
+				Optional: true,
+			},
+			"key_fingerprint": {
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+			"encrypted_secret": {
+				Type:     schema.TypeString,
+				Computed: true,
 			},
 		},
 	}
 }
 
 func resourceAlicloudRamAccessKeyCreate(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ramconn
-
-	args := ram.UserQueryRequest{}
+	client := meta.(*connectivity.AliyunClient)
+	ramService := RamService{client}
+	request := ram.CreateCreateAccessKeyRequest()
 	if v, ok := d.GetOk("user_name"); ok && v.(string) != "" {
-		args.UserName = v.(string)
+		request.UserName = v.(string)
 	}
 
-	response, err := conn.CreateAccessKey(args)
+	raw, err := client.WithRamClient(func(ramClient *ram.Client) (interface{}, error) {
+		return ramClient.CreateAccessKey(request)
+	})
 	if err != nil {
-		return fmt.Errorf("CreateAccessKey got an error: %#v", err)
+		return WrapErrorf(err, DefaultErrorMsg, "alicloud_ram_access_key", request.GetActionName(), AlibabaCloudSdkGoERROR)
 	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ram.CreateAccessKeyResponse)
 
-	// create a secret_file and write access key to it.
+	if v, ok := d.GetOk("pgp_key"); ok {
+		pgpKey := v.(string)
+		encryptionKey, err := encryption.RetrieveGPGKey(pgpKey)
+		if err != nil {
+			return WrapError(err)
+		}
+		fingerprint, encrypted, err := encryption.EncryptValue(encryptionKey, response.AccessKey.AccessKeySecret, "Alicloud RAM Access Key Secret")
+		if err != nil {
+			return WrapError(err)
+		}
+		d.Set("key_fingerprint", fingerprint)
+		d.Set("encrypted_secret", encrypted)
+
+	}
 	if output, ok := d.GetOk("secret_file"); ok && output != nil {
+		// create a secret_file and write access key to it.
 		writeToFile(output.(string), response.AccessKey)
 	}
 
 	d.SetId(response.AccessKey.AccessKeyId)
+	err = ramService.WaitForRamAccessKey(d.Id(), request.UserName, Active, DefaultTimeout)
+	if err != nil {
+		return WrapError(err)
+	}
 	return resourceAlicloudRamAccessKeyUpdate(d, meta)
 }
 
 func resourceAlicloudRamAccessKeyUpdate(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ramconn
+	client := meta.(*connectivity.AliyunClient)
 
-	d.Partial(true)
+	request := ram.CreateUpdateAccessKeyRequest()
+	request.RegionId = client.RegionId
+	request.UserAccessKeyId = d.Id()
+	request.Status = d.Get("status").(string)
 
-	args := ram.UpdateAccessKeyRequest{
-		UserAccessKeyId: d.Id(),
-		Status:          ram.State(d.Get("status").(string)),
-	}
 	if v, ok := d.GetOk("user_name"); ok && v.(string) != "" {
-		args.UserName = v.(string)
+		request.UserName = v.(string)
 	}
 
 	if d.HasChange("status") {
-		d.SetPartial("status")
-		if _, err := conn.UpdateAccessKey(args); err != nil {
-			return fmt.Errorf("UpdateAccessKey got an error: %#v", err)
+		raw, err := client.WithRamClient(func(ramClient *ram.Client) (interface{}, error) {
+			return ramClient.UpdateAccessKey(request)
+		})
+		if err != nil {
+			return WrapErrorf(err, DefaultErrorMsg, d.Id(), request.GetActionName(), AlibabaCloudSdkGoERROR)
 		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
 	}
-
-	d.Partial(false)
 	return resourceAlicloudRamAccessKeyRead(d, meta)
 }
 
 func resourceAlicloudRamAccessKeyRead(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ramconn
-
-	args := ram.UserQueryRequest{}
+	client := meta.(*connectivity.AliyunClient)
+	ramservice := RamService{client}
+	userName := ""
 	if v, ok := d.GetOk("user_name"); ok && v.(string) != "" {
-		args.UserName = v.(string)
+		userName = v.(string)
 	}
-
-	response, err := conn.ListAccessKeys(args)
+	object, err := ramservice.DescribeRamAccessKey(d.Id(), userName)
 	if err != nil {
-		return fmt.Errorf("Get list access keys got an error: %#v", err)
-	}
-
-	accessKeys := response.AccessKeys.AccessKey
-	if len(accessKeys) < 1 {
-		return fmt.Errorf("No access keys found.")
-	}
-
-	for _, v := range accessKeys {
-		if v.AccessKeyId == d.Id() {
-			d.Set("status", v.Status)
+		if NotFoundError(err) {
+			d.SetId("")
 			return nil
 		}
+		return WrapError(err)
 	}
-
-	d.SetId("")
+	d.Set("status", object.Status)
 	return nil
 }
 
 func resourceAlicloudRamAccessKeyDelete(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ramconn
-
-	args := ram.UpdateAccessKeyRequest{
-		UserAccessKeyId: d.Id(),
-	}
-
-	queryArgs := ram.UserQueryRequest{}
+	client := meta.(*connectivity.AliyunClient)
+	ramService := RamService{client}
+	request := ram.CreateDeleteAccessKeyRequest()
+	request.RegionId = client.RegionId
+	request.UserAccessKeyId = d.Id()
 
 	if v, ok := d.GetOk("user_name"); ok && v.(string) != "" {
-		args.UserName = v.(string)
-		queryArgs.UserName = v.(string)
+		request.UserName = v.(string)
 	}
 
-	return resource.Retry(5*time.Minute, func() *resource.RetryError {
-		if _, err := conn.DeleteAccessKey(args); err != nil {
-			if RamEntityNotExist(err) {
-				return nil
-			}
-			return resource.NonRetryableError(fmt.Errorf("Error deleting access key: %#v", err))
-		}
-
-		response, err := conn.ListAccessKeys(queryArgs)
-		if err != nil {
-			if RamEntityNotExist(err) {
-				return nil
-			}
-			return resource.NonRetryableError(err)
-		}
-
-		if len(response.AccessKeys.AccessKey) < 1 {
+	raw, err := client.WithRamClient(func(ramClient *ram.Client) (interface{}, error) {
+		return ramClient.DeleteAccessKey(request)
+	})
+	if err != nil {
+		if IsExpectedErrors(err, []string{"EntityNotExist"}) {
 			return nil
 		}
+		return WrapErrorf(err, DefaultErrorMsg, request.UserName, request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	return WrapError(ramService.WaitForRamAccessKey(d.Id(), request.UserName, Deleted, DefaultTimeoutMedium))
 
-		return resource.RetryableError(fmt.Errorf("Error deleting access key - trying again while it is deleted."))
-	})
 }

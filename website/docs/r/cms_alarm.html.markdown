@@ -1,4 +1,5 @@
 ---
+subcategory: "Cloud Monitor"
 layout: "alicloud"
 page_title: "Alicloud: alicloud_cms_alarm"
 sidebar_current: "docs-alicloud-resource-cms-alarm"
@@ -17,22 +18,22 @@ Basic Usage
 
 ```
 resource "alicloud_cms_alarm" "basic" {
-  name = "tf-testAccCmsAlarm_basic"
+  name    = "tf-testAccCmsAlarm_basic"
   project = "acs_ecs_dashboard"
-  metric = "disk_writebytes"
+  metric  = "disk_writebytes"
   dimensions = {
     instanceId = "i-bp1247,i-bp11gd"
-    device = "/dev/vda1,/dev/vdb1"
+    device     = "/dev/vda1,/dev/vdb1"
   }
-  statistics ="Average"
-  period = 900
-  operator = "<="
-  threshold = 35
+  statistics      = "Average"
+  period          = 900
+  operator        = "<="
+  threshold       = 35
   triggered_count = 2
-  contact_groups = ["test-group"]
-  end_time = 20
-  start_time = 6
-  notify_type = 1
+  contact_groups  = ["test-group"]
+  effective_interval = "0:00-2:00"
+  notify_type     = 1
+  webhook         = "https://${data.alicloud_account.current.id}.eu-central-1.fc.aliyuncs.com/2016-08-15/proxy/Terraform/AlarmEndpointMock/"
 }
 ```
 
@@ -50,11 +51,13 @@ The following arguments are supported:
 * `threshold` - (Required) Alarm threshold value, which must be a numeric value currently.
 * `triggered_count` - Number of consecutive times it has been detected that the values exceed the threshold. Default to 3.
 * `contact_groups` - (Required) List contact groups of the alarm rule, which must have been created on the console.
-* `start_time` - Start time of the alarm effective period. Default to 0 and it indicates the time 00:00. Valid value range: [0, 24].
-* `end_time` - End time of the alarm effective period. Default value 24 and it indicates the time 24:00. Valid value range: [0, 24].
+* `effective_interval` - (Available in 1.50.0+) The interval of effecting alarm rule. It foramt as "hh:mm-hh:mm", like "0:00-4:00". Default to "00:00-23:59".
+* `start_time` - It has been deprecated from provider version 1.50.0 and 'effective_interval' instead.
+* `end_time` - It has been deprecated from provider version 1.50.0 and 'effective_interval' instead.
 * `silence_time` - Notification silence period in the alarm state, in seconds. Valid value range: [300, 86400]. Default to 86400
 * `notify_type` - Notification type. Valid value [0, 1]. The value 0 indicates TradeManager+email, and the value 1 indicates that TradeManager+email+SMS
 * `enabled` - Whether to enable alarm rule. Default to true.
+* `webhook`- (Optional, Available in 1.46.0+) The webhook that should be called when the alarm is triggered. Currently, only http protocol is supported. Default is empty string.
 
 
 ## Attributes Reference
@@ -62,23 +65,7 @@ The following arguments are supported:
 The following attributes are exported:
 
 * `id` - The ID of the alarm rule.
-* `name` - The alarm name.
-* `project` - Monitor project name.
-* `metric` - Name of the monitoring metrics.
-* `dimensions` - Map of the resources associated with the alarm rule.
-* `period` - Index query cycle.
-* `statistics` - Statistical method.
-* `operator` - Alarm comparison operator.
-* `threshold` - Alarm threshold value.
-* `triggered_count` - Number of trigger alarm.
-* `contact_groups` - List contact groups of the alarm rule.
-* `start_time` - Start time of the alarm effective period.
-* `end_time` - End time of the alarm effective period.
-* `silence_time` - Notification silence period in the alarm state.
-* `notify_type` - Notification type.
-* `enabled` - Whether to enable alarm rule.
 * `status` - The current alarm rule status.
-
 
 ## Import
 

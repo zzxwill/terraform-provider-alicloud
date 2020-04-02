@@ -1,12 +1,14 @@
 package alicloud
 
 import (
-	"fmt"
 	"time"
 
-	"github.com/denverdino/aliyungo/ecs"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 func resourceAliyunSecurityGroup() *schema.Resource {
@@ -20,133 +22,197 @@ func resourceAliyunSecurityGroup() *schema.Resource {
 		},
 
 		Schema: map[string]*schema.Schema{
-			"name": &schema.Schema{
+			"name": {
 				Type:         schema.TypeString,
 				Optional:     true,
-				ValidateFunc: validateSecurityGroupName,
+				ValidateFunc: validation.StringLenBetween(2, 128),
 			},
 
-			"description": &schema.Schema{
+			"description": {
 				Type:         schema.TypeString,
 				Optional:     true,
-				ValidateFunc: validateSecurityGroupDescription,
+				ValidateFunc: validation.StringLenBetween(2, 256),
 			},
 
-			"vpc_id": &schema.Schema{
+			"vpc_id": {
 				Type:     schema.TypeString,
 				Optional: true,
 				ForceNew: true,
 			},
-			"inner_access": &schema.Schema{
-				Type:     schema.TypeBool,
+			"resource_group_id": {
+				Type:     schema.TypeString,
 				Optional: true,
-				Default:  true,
+				ForceNew: true,
 			},
+			"security_group_type": {
+				Type:         schema.TypeString,
+				Optional:     true,
+				Default:      "normal",
+				ForceNew:     true,
+				ValidateFunc: validation.StringInSlice([]string{"normal", "enterprise"}, false),
+			},
+			"inner_access": {
+				Type:       schema.TypeBool,
+				Optional:   true,
+				Computed:   true,
+				Deprecated: "Field 'inner_access' has been deprecated from provider version 1.55.3. Use 'inner_access_policy' replaces it.",
+			},
+			"inner_access_policy": {
+				Type:          schema.TypeString,
+				Optional:      true,
+				Computed:      true,
+				ConflictsWith: []string{"inner_access"},
+				ValidateFunc:  validation.StringInSlice([]string{"Accept", "Drop"}, false),
+				// The InnerAccessPolicy attribute of enterprise level security group can't be modified.
+				DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+					return d.Get("security_group_type").(string) == "enterprise"
+				},
+			},
+			"tags": tagsSchema(),
 		},
 	}
 }
 
 func resourceAliyunSecurityGroupCreate(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ecsconn
+	client := meta.(*connectivity.AliyunClient)
 
-	args, err := buildAliyunSecurityGroupArgs(d, meta)
-	if err != nil {
-		return err
+	request := ecs.CreateCreateSecurityGroupRequest()
+	request.RegionId = client.RegionId
+
+	if v := d.Get("name").(string); v != "" {
+		request.SecurityGroupName = v
 	}
 
-	securityGroupID, err := conn.CreateSecurityGroup(args)
-	if err != nil {
-		return err
+	if v := d.Get("description").(string); v != "" {
+		request.Description = v
 	}
 
-	d.SetId(securityGroupID)
+	request.SecurityGroupType = d.Get("security_group_type").(string)
+
+	if v := d.Get("vpc_id").(string); v != "" {
+		request.VpcId = v
+	}
+
+	request.ResourceGroupId = d.Get("resource_group_id").(string)
+
+	request.ClientToken = buildClientToken(request.GetActionName())
+
+	raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.CreateSecurityGroup(request)
+	})
+	if err != nil {
+		return WrapErrorf(err, DefaultErrorMsg, "alicloud_security_group", request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ecs.CreateSecurityGroupResponse)
+	d.SetId(response.SecurityGroupId)
 	return resourceAliyunSecurityGroupUpdate(d, meta)
 }
 
 func resourceAliyunSecurityGroupRead(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ecsconn
+	client := meta.(*connectivity.AliyunClient)
+	ecsService := EcsService{client}
 
-	args := &ecs.DescribeSecurityGroupAttributeArgs{
-		SecurityGroupId: d.Id(),
-		RegionId:        getRegion(d, meta),
-	}
-	//err := resource.Retry(3*time.Minute, func() *resource.RetryError {
-	var sg *ecs.DescribeSecurityGroupAttributeResponse
-	err := resource.Retry(1*time.Minute, func() *resource.RetryError {
-		group, e := conn.DescribeSecurityGroupAttribute(args)
-		if e != nil {
-			if IsExceptedError(e, InvalidSecurityGroupIdNotFound) {
-				sg = nil
-				return nil
-			}
-			return resource.NonRetryableError(fmt.Errorf("Error DescribeSecurityGroupAttribute: %#v", e))
-		}
-		if group != nil {
-			sg = group
+	object, err := ecsService.DescribeSecurityGroup(d.Id())
+	if err != nil {
+		if NotFoundError(err) {
+			d.SetId("")
 			return nil
 		}
-		return resource.RetryableError(fmt.Errorf("Create security group timeout and got an error: %#v", e))
+	}
+
+	d.Set("name", object.SecurityGroupName)
+	d.Set("description", object.Description)
+	d.Set("vpc_id", object.VpcId)
+	d.Set("inner_access", object.InnerAccessPolicy == string(GroupInnerAccept))
+	d.Set("inner_access_policy", object.InnerAccessPolicy)
+
+	request := ecs.CreateDescribeSecurityGroupsRequest()
+	request.RegionId = client.RegionId
+	request.SecurityGroupId = d.Id()
+
+	raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeSecurityGroups(request)
 	})
-
 	if err != nil {
-		return err
+		return WrapErrorf(err, DefaultErrorMsg, d.Id(), request.GetActionName(), AlibabaCloudSdkGoERROR)
 	}
-	if sg == nil {
-		d.SetId("")
-		return nil
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ecs.DescribeSecurityGroupsResponse)
+	if len(response.SecurityGroups.SecurityGroup) < 1 {
+		return WrapErrorf(Error(GetNotFoundMessage("SecurityGroup", d.Id())), NotFoundMsg, ProviderERROR)
 	}
-
-	d.Set("name", sg.SecurityGroupName)
-	d.Set("description", sg.Description)
-	d.Set("vpc_id", sg.VpcId)
-	d.Set("inner_access", sg.InnerAccessPolicy == ecs.GroupInnerAccept)
+	d.Set("security_group_type", response.SecurityGroups.SecurityGroup[0].SecurityGroupType)
+	d.Set("resource_group_id", response.SecurityGroups.SecurityGroup[0].ResourceGroupId)
+	d.Set("tags", ecsService.tagsToMapForSecurityGroup(response.SecurityGroups.SecurityGroup[0].Tags.Tag))
 
 	return nil
 }
 
 func resourceAliyunSecurityGroupUpdate(d *schema.ResourceData, meta interface{}) error {
-
-	conn := meta.(*AliyunClient).ecsconn
+	client := meta.(*connectivity.AliyunClient)
 
 	d.Partial(true)
-	attributeUpdate := false
-	args := &ecs.ModifySecurityGroupAttributeArgs{
-		SecurityGroupId: d.Id(),
-		RegionId:        getRegion(d, meta),
+
+	if err := setTags(client, TagResourceSecurityGroup, d); err != nil {
+		return WrapError(err)
+	} else {
+		d.SetPartial("tags")
 	}
 
-	if d.HasChange("name") && !d.IsNewResource() {
+	if d.HasChange("inner_access_policy") || d.HasChange("inner_access") || d.IsNewResource() && d.Get("security_group_type").(string) != "enterprise" {
+		policy := GroupInnerAccept
+		if v, ok := d.GetOk("inner_access_policy"); ok && v.(string) != "" {
+			policy = GroupInnerAccessPolicy(v.(string))
+		} else if v, ok := d.GetOkExists("inner_access"); ok && !v.(bool) {
+			policy = GroupInnerDrop
+		}
+
+		request := ecs.CreateModifySecurityGroupPolicyRequest()
+		request.RegionId = client.RegionId
+		request.SecurityGroupId = d.Id()
+		request.InnerAccessPolicy = string(policy)
+		request.ClientToken = buildClientToken(request.GetActionName())
+
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.ModifySecurityGroupPolicy(request)
+		})
+		if err != nil {
+			return WrapErrorf(err, DefaultErrorMsg, d.Id(), request.GetActionName(), AlibabaCloudSdkGoERROR)
+		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		d.SetPartial("inner_access")
+		d.SetPartial("inner_access_policy")
+	}
+
+	if d.IsNewResource() {
+		d.Partial(false)
+		return resourceAliyunSecurityGroupRead(d, meta)
+	}
+
+	update := false
+	request := ecs.CreateModifySecurityGroupAttributeRequest()
+	request.RegionId = client.RegionId
+	request.SecurityGroupId = d.Id()
+	if d.HasChange("name") {
+		request.SecurityGroupName = d.Get("name").(string)
+		update = true
+	}
+
+	if d.HasChange("description") {
+		request.Description = d.Get("description").(string)
+		update = true
+	}
+	if update {
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.ModifySecurityGroupAttribute(request)
+		})
+		if err != nil {
+			return WrapErrorf(err, DefaultErrorMsg, d.Id(), request.GetActionName(), AlibabaCloudSdkGoERROR)
+		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
 		d.SetPartial("name")
-		args.SecurityGroupName = d.Get("name").(string)
-
-		attributeUpdate = true
-	}
-
-	if d.HasChange("description") && !d.IsNewResource() {
 		d.SetPartial("description")
-		args.Description = d.Get("description").(string)
-
-		attributeUpdate = true
-	}
-	if attributeUpdate {
-		if err := conn.ModifySecurityGroupAttribute(args); err != nil {
-			return err
-		}
-	}
-
-	if d.HasChange("inner_access") {
-		policy := ecs.GroupInnerAccept
-		if !d.Get("inner_access").(bool) {
-			policy = ecs.GroupInnerDrop
-		}
-		if err := conn.ModifySecurityGroupPolicy(&ecs.ModifySecurityGroupPolicyArgs{
-			RegionId:          getRegion(d, meta),
-			SecurityGroupId:   d.Id(),
-			InnerAccessPolicy: policy,
-		}); err != nil {
-			return fmt.Errorf("ModifySecurityGroupPolicy got an error: %#v.", err)
-		}
-
 	}
 
 	d.Partial(false)
@@ -155,54 +221,30 @@ func resourceAliyunSecurityGroupUpdate(d *schema.ResourceData, meta interface{})
 }
 
 func resourceAliyunSecurityGroupDelete(d *schema.ResourceData, meta interface{}) error {
+	client := meta.(*connectivity.AliyunClient)
+	ecsService := EcsService{client}
+	request := ecs.CreateDeleteSecurityGroupRequest()
+	request.RegionId = client.RegionId
+	request.SecurityGroupId = d.Id()
 
-	conn := meta.(*AliyunClient).ecsconn
-
-	return resource.Retry(5*time.Minute, func() *resource.RetryError {
-		err := conn.DeleteSecurityGroup(getRegion(d, meta), d.Id())
-
-		if err != nil {
-			if IsExceptedError(err, SgDependencyViolation) {
-				return resource.RetryableError(fmt.Errorf("Delete security group timeout and got an error: %#v", err))
-			}
-		}
-
-		sg, err := conn.DescribeSecurityGroupAttribute(&ecs.DescribeSecurityGroupAttributeArgs{
-			RegionId:        getRegion(d, meta),
-			SecurityGroupId: d.Id(),
+	err := resource.Retry(6*time.Minute, func() *resource.RetryError {
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.DeleteSecurityGroup(request)
 		})
 
 		if err != nil {
-			if IsExceptedError(err, InvalidSecurityGroupIdNotFound) {
-				return nil
+			if IsExpectedErrors(err, []string{"DependencyViolation"}) {
+				return resource.RetryableError(err)
 			}
 			return resource.NonRetryableError(err)
-		} else if sg == nil {
-			return nil
 		}
-
-		return resource.RetryableError(fmt.Errorf("Delete security group timeout and got an error: %#v", err))
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		return nil
 	})
 
-}
-
-func buildAliyunSecurityGroupArgs(d *schema.ResourceData, meta interface{}) (*ecs.CreateSecurityGroupArgs, error) {
-
-	args := &ecs.CreateSecurityGroupArgs{
-		RegionId: getRegion(d, meta),
+	if err != nil {
+		return WrapErrorf(err, DefaultTimeoutMsg, d.Id(), request.GetActionName(), ProviderERROR)
 	}
+	return WrapError(ecsService.WaitForSecurityGroup(d.Id(), Deleted, DefaultTimeoutMedium))
 
-	if v := d.Get("name").(string); v != "" {
-		args.SecurityGroupName = v
-	}
-
-	if v := d.Get("description").(string); v != "" {
-		args.Description = v
-	}
-
-	if v := d.Get("vpc_id").(string); v != "" {
-		args.VpcId = v
-	}
-
-	return args, nil
 }

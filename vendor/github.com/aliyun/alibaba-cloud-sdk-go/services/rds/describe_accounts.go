@@ -76,19 +76,23 @@ func (client *Client) DescribeAccountsWithCallback(request *DescribeAccountsRequ
 // DescribeAccountsRequest is the request struct for api DescribeAccounts
 type DescribeAccountsRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	DBInstanceId         string           `position:"Query" name:"DBInstanceId"`
+	PageNumber           requests.Integer `position:"Query" name:"PageNumber"`
 	AccountName          string           `position:"Query" name:"AccountName"`
+	PageSize             requests.Integer `position:"Query" name:"PageSize"`
+	DBInstanceId         string           `position:"Query" name:"DBInstanceId"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
 }
 
 // DescribeAccountsResponse is the response struct for api DescribeAccounts
 type DescribeAccountsResponse struct {
 	*responses.BaseResponse
-	RequestId string                     `json:"RequestId" xml:"RequestId"`
-	Accounts  AccountsInDescribeAccounts `json:"Accounts" xml:"Accounts"`
+	RequestId                             string                     `json:"RequestId" xml:"RequestId"`
+	SystemAdminAccountStatus              string                     `json:"SystemAdminAccountStatus" xml:"SystemAdminAccountStatus"`
+	SystemAdminAccountFirstActivationTime string                     `json:"SystemAdminAccountFirstActivationTime" xml:"SystemAdminAccountFirstActivationTime"`
+	Accounts                              AccountsInDescribeAccounts `json:"Accounts" xml:"Accounts"`
 }
 
 // CreateDescribeAccountsRequest creates a request to invoke DescribeAccounts API

@@ -76,12 +76,12 @@ func (client *Client) DeleteVirtualBorderRouterWithCallback(request *DeleteVirtu
 // DeleteVirtualBorderRouterRequest is the request struct for api DeleteVirtualBorderRouter
 type DeleteVirtualBorderRouterRequest struct {
 	*requests.RpcRequest
-	VbrId                string           `position:"Query" name:"VbrId"`
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
 	ClientToken          string           `position:"Query" name:"ClientToken"`
+	VbrId                string           `position:"Query" name:"VbrId"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
 }
 
 // DeleteVirtualBorderRouterResponse is the response struct for api DeleteVirtualBorderRouter
@@ -95,7 +95,7 @@ func CreateDeleteVirtualBorderRouterRequest() (request *DeleteVirtualBorderRoute
 	request = &DeleteVirtualBorderRouterRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "DeleteVirtualBorderRouter", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "DeleteVirtualBorderRouter", "Vpc", "openAPI")
 	return
 }
 

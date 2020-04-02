@@ -2,172 +2,101 @@ package alicloud
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/rds"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform/helper/acctest"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
-func TestAccAlicloudDBConnection_basic(t *testing.T) {
-	var connection rds.DBInstanceNetInfo
-
+func TestAccAlicloudDBConnectionConfigUpdate(t *testing.T) {
+	var v *rds.DBInstanceNetInfo
+	rand := acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
+	name := fmt.Sprintf("tf-testAccDBconnection%s", rand)
+	var basicMap = map[string]string{
+		"instance_id":       CHECKSET,
+		"connection_string": REGEXMATCH + fmt.Sprintf("^tf-testacc%s.mysql.([a-z-A-Z-0-9]+.){0,1}rds.aliyuncs.com", rand),
+		"port":              "3306",
+		"ip_address":        CHECKSET,
+	}
+	resourceId := "alicloud_db_connection.default"
+	ra := resourceAttrInit(resourceId, basicMap)
+	serviceFunc := func() interface{} {
+		return &RdsService{testAccProvider.Meta().(*connectivity.AliyunClient)}
+	}
+	rc := resourceCheckInitWithDescribeMethod(resourceId, &v, serviceFunc, "DescribeDBConnection")
+	rac := resourceAttrCheckInit(rc, ra)
+	testAccCheck := rac.resourceAttrMapUpdateSet()
+	testAccConfig := resourceTestAccConfigFunc(resourceId, name, resourceDBConnectionConfigDependence)
 	resource.Test(t, resource.TestCase{
 		PreCheck: func() {
 			testAccPreCheck(t)
 		},
 
 		// module name
-		IDRefreshName: "alicloud_db_connection.foo",
+		IDRefreshName: resourceId,
 
 		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckDBConnectionDestroy,
+		CheckDestroy: rac.checkResourceDestroy(),
 		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccDBConnection_basic,
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"instance_id":       "${alicloud_db_instance.instance.id}",
+					"connection_prefix": fmt.Sprintf("tf-testacc%s", rand),
+				}),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckDBConnectionExists(
-						"alicloud_db_connection.foo", &connection),
-					resource.TestCheckResourceAttr(
-						"alicloud_db_connection.foo",
-						"connection_string",
-						"test-connection.mysql.rds.aliyuncs.com"),
-					resource.TestCheckResourceAttr(
-						"alicloud_db_connection.foo",
-						"port", "3306"),
+					testAccCheck(nil),
 				),
 			},
-			resource.TestStep{
-				Config: testAccDBConnection_update,
+			{
+				ResourceName:      resourceId,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"port": "3333",
+				}),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckDBConnectionExists(
-						"alicloud_db_connection.foo", &connection),
-					resource.TestCheckResourceAttr(
-						"alicloud_db_connection.foo",
-						"connection_string",
-						"test-connection.mysql.rds.aliyuncs.com"),
-					resource.TestCheckResourceAttr(
-						"alicloud_db_connection.foo",
-						"port", "3333"),
+					testAccCheck(map[string]string{
+						"port": "3333",
+					}),
 				),
 			},
 		},
 	})
-
 }
 
-func testAccCheckDBConnectionExists(n string, d *rds.DBInstanceNetInfo) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[n]
-		if !ok {
-			return fmt.Errorf("Not found: %s", n)
-		}
-
-		if rs.Primary.ID == "" {
-			return fmt.Errorf("No DB connection ID is set")
-		}
-
-		client := testAccProvider.Meta().(*AliyunClient)
-		parts := strings.Split(rs.Primary.ID, COLON_SEPARATED)
-		conn, err := client.DescribeDBInstanceNetInfoByIpType(parts[0], Public)
-
-		if err != nil {
-			return err
-		}
-
-		if conn == nil {
-			return fmt.Errorf("Connection string is not found in the instance %s.", parts[0])
-		}
-
-		*d = *conn
-		return nil
-	}
-}
-
-func testAccCheckDBConnectionDestroy(s *terraform.State) error {
-	client := testAccProvider.Meta().(*AliyunClient)
-
-	for _, rs := range s.RootModule().Resources {
-		if rs.Type != "alicloud_db_connection" {
-			continue
-		}
-
-		parts := strings.Split(rs.Primary.ID, COLON_SEPARATED)
-
-		conn, err := client.DescribeDBInstanceNetInfoByIpType(parts[0], Public)
-
-		if err != nil {
-			if NotFoundError(err) || IsExceptedError(err, InvalidDBInstanceIdNotFound) || IsExceptedError(err, InvalidCurrentConnectionStringNotFound) {
-				return nil
-			}
-			return err
-		}
-
-		if conn != nil {
-			return fmt.Errorf("Error db connection string prefix %s is still existing.", parts[1])
-		}
+func resourceDBConnectionConfigDependence(name string) string {
+	return fmt.Sprintf(`
+	%s
+	variable "creation" {
+		default = "Rds"
 	}
 
-	return nil
-}
+	variable "name" {
+		default = "%s"
+	}
 
-const testAccDBConnection_basic = `
-data "alicloud_zones" "default" {
-	"available_resource_creation"= "Rds"
-}
+	data "alicloud_db_instance_engines" "default" {
+  		instance_charge_type = "PostPaid"
+  		engine               = "MySQL"
+  		engine_version       = "5.6"
+	}
 
-resource "alicloud_vpc" "foo" {
-	name = "tf_test_foo"
-	cidr_block = "172.16.0.0/12"
-}
+	data "alicloud_db_instance_classes" "default" {
+ 	 	engine = "${data.alicloud_db_instance_engines.default.instance_engines.0.engine}"
+		engine_version = "${data.alicloud_db_instance_engines.default.instance_engines.0.engine_version}"
+	}
 
-resource "alicloud_vswitch" "foo" {
- 	vpc_id = "${alicloud_vpc.foo.id}"
- 	cidr_block = "172.16.0.0/21"
- 	availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+	resource "alicloud_db_instance" "instance" {
+		engine = "${data.alicloud_db_instance_engines.default.instance_engines.0.engine}"
+		engine_version = "${data.alicloud_db_instance_engines.default.instance_engines.0.engine_version}"
+		instance_type = "${data.alicloud_db_instance_classes.default.instance_classes.0.instance_class}"
+		instance_storage = "${data.alicloud_db_instance_classes.default.instance_classes.0.storage_range.min}"
+		vswitch_id = "${alicloud_vswitch.default.id}"
+		instance_name = "${var.name}"
+	}
+	`, RdsCommonTestCase, name)
 }
-
-resource "alicloud_db_instance" "instance" {
-	engine = "MySQL"
-	engine_version = "5.6"
-	instance_type = "rds.mysql.t1.small"
-	instance_storage = "10"
-  	vswitch_id = "${alicloud_vswitch.foo.id}"
-}
-
-resource "alicloud_db_connection" "foo" {
-  instance_id = "${alicloud_db_instance.instance.id}"
-  connection_prefix = "test-connection"
-}
-`
-const testAccDBConnection_update = `
-data "alicloud_zones" "default" {
-	"available_resource_creation"= "Rds"
-}
-
-resource "alicloud_vpc" "foo" {
-	name = "tf_test_foo"
-	cidr_block = "172.16.0.0/12"
-}
-
-resource "alicloud_vswitch" "foo" {
- 	vpc_id = "${alicloud_vpc.foo.id}"
- 	cidr_block = "172.16.0.0/21"
- 	availability_zone = "${data.alicloud_zones.default.zones.0.id}"
-}
-
-resource "alicloud_db_instance" "instance" {
-	engine = "MySQL"
-	engine_version = "5.6"
-	instance_type = "rds.mysql.t1.small"
-	instance_storage = "10"
-  	vswitch_id = "${alicloud_vswitch.foo.id}"
-}
-
-resource "alicloud_db_connection" "foo" {
-  instance_id = "${alicloud_db_instance.instance.id}"
-  connection_prefix = "test-connection"
-  port = 3333
-}
-`

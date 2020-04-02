@@ -76,12 +76,12 @@ func (client *Client) CancelPhysicalConnectionWithCallback(request *CancelPhysic
 // CancelPhysicalConnectionRequest is the request struct for api CancelPhysicalConnection
 type CancelPhysicalConnectionRequest struct {
 	*requests.RpcRequest
-	PhysicalConnectionId string           `position:"Query" name:"PhysicalConnectionId"`
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
 	ClientToken          string           `position:"Query" name:"ClientToken"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
+	PhysicalConnectionId string           `position:"Query" name:"PhysicalConnectionId"`
 }
 
 // CancelPhysicalConnectionResponse is the response struct for api CancelPhysicalConnection
@@ -95,7 +95,7 @@ func CreateCancelPhysicalConnectionRequest() (request *CancelPhysicalConnectionR
 	request = &CancelPhysicalConnectionRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "CancelPhysicalConnection", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "CancelPhysicalConnection", "Vpc", "openAPI")
 	return
 }
 

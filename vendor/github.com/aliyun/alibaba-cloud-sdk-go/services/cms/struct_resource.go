@@ -17,21 +17,36 @@ package cms
 
 // Resource is a nested struct in cms response
 type Resource struct {
-	Category      string                      `json:"Category" xml:"Category"`
-	Desc          string                      `json:"Desc" xml:"Desc"`
-	InstanceName  string                      `json:"InstanceName" xml:"InstanceName"`
-	GroupName     string                      `json:"GroupName" xml:"GroupName"`
-	Id            int                         `json:"Id" xml:"Id"`
-	BindUrls      string                      `json:"BindUrls" xml:"BindUrls"`
-	ServiceId     string                      `json:"ServiceId" xml:"ServiceId"`
-	RegionId      string                      `json:"RegionId" xml:"RegionId"`
-	InstanceId    string                      `json:"InstanceId" xml:"InstanceId"`
-	GroupId       int                         `json:"GroupId" xml:"GroupId"`
-	AliUid        int                         `json:"AliUid" xml:"AliUid"`
-	NetworkType   string                      `json:"NetworkType" xml:"NetworkType"`
-	Type          string                      `json:"Type" xml:"Type"`
-	Vpc           Vpc                         `json:"Vpc" xml:"Vpc"`
-	Region        Region                      `json:"Region" xml:"Region"`
-	Tags          Tags                        `json:"Tags" xml:"Tags"`
-	ContactGroups ContactGroupsInListMyGroups `json:"ContactGroups" xml:"ContactGroups"`
+	TemplateId     string                                      `json:"TemplateId" xml:"TemplateId"`
+	Name           string                                      `json:"Name" xml:"Name"`
+	Category       string                                      `json:"Category" xml:"Category"`
+	Unit           string                                      `json:"Unit" xml:"Unit"`
+	NameDesc       string                                      `json:"NameDesc" xml:"NameDesc"`
+	Desc           string                                      `json:"Desc" xml:"Desc"`
+	Dimensions     string                                      `json:"Dimensions" xml:"Dimensions"`
+	RestVersion    string                                      `json:"RestVersion" xml:"RestVersion"`
+	RegionId       string                                      `json:"RegionId" xml:"RegionId"`
+	InstanceId     string                                      `json:"InstanceId" xml:"InstanceId"`
+	NetworkType    string                                      `json:"NetworkType" xml:"NetworkType"`
+	Description    string                                      `json:"Description" xml:"Description"`
+	Periods        string                                      `json:"Periods" xml:"Periods"`
+	Product        string                                      `json:"Product" xml:"Product"`
+	InstanceName   string                                      `json:"InstanceName" xml:"InstanceName"`
+	Level          string                                      `json:"Level" xml:"Level"`
+	Dimension      string                                      `json:"Dimension" xml:"Dimension"`
+	Id             int64                                       `json:"Id" xml:"Id"`
+	EventType      string                                      `json:"EventType" xml:"EventType"`
+	Namespace      string                                      `json:"Namespace" xml:"Namespace"`
+	GroupId        int64                                       `json:"GroupId" xml:"GroupId"`
+	ServiceId      int64                                       `json:"ServiceId" xml:"ServiceId"`
+	MetricName     string                                      `json:"MetricName" xml:"MetricName"`
+	StatusDesc     string                                      `json:"StatusDesc" xml:"StatusDesc"`
+	Labels         string                                      `json:"Labels" xml:"Labels"`
+	Status         string                                      `json:"Status" xml:"Status"`
+	Statistics     string                                      `json:"Statistics" xml:"Statistics"`
+	Vpc            Vpc                                         `json:"Vpc" xml:"Vpc"`
+	Region         Region                                      `json:"Region" xml:"Region"`
+	Tags           TagsInDescribeMonitorGroupInstanceAttribute `json:"Tags" xml:"Tags"`
+	AlertResults   []Result                                    `json:"AlertResults" xml:"AlertResults"`
+	AlertTemplates AlertTemplates                              `json:"AlertTemplates" xml:"AlertTemplates"`
 }

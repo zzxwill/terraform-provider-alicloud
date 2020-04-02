@@ -76,25 +76,32 @@ func (client *Client) CreateNatGatewayWithCallback(request *CreateNatGatewayRequ
 // CreateNatGatewayRequest is the request struct for api CreateNatGateway
 type CreateNatGatewayRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer                    `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string                              `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer                    `position:"Query" name:"ResourceOwnerId"`
+	ClientToken          string                              `position:"Query" name:"ClientToken"`
+	Description          string                              `position:"Query" name:"Description"`
+	Spec                 string                              `position:"Query" name:"Spec"`
+	Duration             string                              `position:"Query" name:"Duration"`
+	NatType              string                              `position:"Query" name:"NatType"`
+	BandwidthPackage     *[]CreateNatGatewayBandwidthPackage `position:"Query" name:"BandwidthPackage"  type:"Repeated"`
+	InstanceChargeType   string                              `position:"Query" name:"InstanceChargeType"`
+	AutoPay              requests.Boolean                    `position:"Query" name:"AutoPay"`
+	ResourceOwnerAccount string                              `position:"Query" name:"ResourceOwnerAccount"`
 	OwnerAccount         string                              `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer                    `position:"Query" name:"OwnerId"`
+	VSwitchId            string                              `position:"Query" name:"VSwitchId"`
+	InternetChargeType   string                              `position:"Query" name:"InternetChargeType"`
 	VpcId                string                              `position:"Query" name:"VpcId"`
 	Name                 string                              `position:"Query" name:"Name"`
-	Description          string                              `position:"Query" name:"Description"`
-	ClientToken          string                              `position:"Query" name:"ClientToken"`
-	Spec                 string                              `position:"Query" name:"Spec"`
-	BandwidthPackage     *[]CreateNatGatewayBandwidthPackage `position:"Query" name:"BandwidthPackage"  type:"Repeated"`
+	PricingCycle         string                              `position:"Query" name:"PricingCycle"`
 }
 
 // CreateNatGatewayBandwidthPackage is a repeated param struct in CreateNatGatewayRequest
 type CreateNatGatewayBandwidthPackage struct {
-	IpCount            string `name:"IpCount"`
 	Bandwidth          string `name:"Bandwidth"`
 	Zone               string `name:"Zone"`
-	ISP                string `name:"ISP"`
 	InternetChargeType string `name:"InternetChargeType"`
+	ISP                string `name:"ISP"`
+	IpCount            string `name:"IpCount"`
 }
 
 // CreateNatGatewayResponse is the response struct for api CreateNatGateway
@@ -112,7 +119,7 @@ func CreateCreateNatGatewayRequest() (request *CreateNatGatewayRequest) {
 	request = &CreateNatGatewayRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "CreateNatGateway", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "CreateNatGateway", "Vpc", "openAPI")
 	return
 }
 

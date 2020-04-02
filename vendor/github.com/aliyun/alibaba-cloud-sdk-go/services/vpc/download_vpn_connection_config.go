@@ -76,10 +76,10 @@ func (client *Client) DownloadVpnConnectionConfigWithCallback(request *DownloadV
 // DownloadVpnConnectionConfigRequest is the request struct for api DownloadVpnConnectionConfig
 type DownloadVpnConnectionConfigRequest struct {
 	*requests.RpcRequest
+	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
 	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
-	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
 	VpnConnectionId      string           `position:"Query" name:"VpnConnectionId"`
 }
 
@@ -95,7 +95,7 @@ func CreateDownloadVpnConnectionConfigRequest() (request *DownloadVpnConnectionC
 	request = &DownloadVpnConnectionConfigRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "DownloadVpnConnectionConfig", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "DownloadVpnConnectionConfig", "Vpc", "openAPI")
 	return
 }
 

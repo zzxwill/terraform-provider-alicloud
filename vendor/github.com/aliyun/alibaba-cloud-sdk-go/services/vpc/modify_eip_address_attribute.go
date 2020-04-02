@@ -76,14 +76,14 @@ func (client *Client) ModifyEipAddressAttributeWithCallback(request *ModifyEipAd
 // ModifyEipAddressAttributeRequest is the request struct for api ModifyEipAddressAttribute
 type ModifyEipAddressAttributeRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	AllocationId         string           `position:"Query" name:"AllocationId"`
-	Bandwidth            string           `position:"Query" name:"Bandwidth"`
-	Name                 string           `position:"Query" name:"Name"`
 	Description          string           `position:"Query" name:"Description"`
+	AllocationId         string           `position:"Query" name:"AllocationId"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
+	Bandwidth            string           `position:"Query" name:"Bandwidth"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
+	Name                 string           `position:"Query" name:"Name"`
 }
 
 // ModifyEipAddressAttributeResponse is the response struct for api ModifyEipAddressAttribute
@@ -97,7 +97,7 @@ func CreateModifyEipAddressAttributeRequest() (request *ModifyEipAddressAttribut
 	request = &ModifyEipAddressAttributeRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "ModifyEipAddressAttribute", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "ModifyEipAddressAttribute", "Vpc", "openAPI")
 	return
 }
 

@@ -1,12 +1,13 @@
 package alicloud
 
 import (
-	"fmt"
-	"log"
 	"regexp"
 
-	"github.com/denverdino/aliyungo/ecs"
-	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 func dataSourceAlicloudKeyPairs() *schema.Resource {
@@ -14,14 +15,25 @@ func dataSourceAlicloudKeyPairs() *schema.Resource {
 		Read: dataSourceAlicloudKeyPairsRead,
 
 		Schema: map[string]*schema.Schema{
-			"name_regex": &schema.Schema{
+			"name_regex": {
 				Type:         schema.TypeString,
 				Optional:     true,
 				ForceNew:     true,
-				ValidateFunc: validateNameRegex,
+				ValidateFunc: validation.ValidateRegexp,
 			},
-
-			"finger_print": &schema.Schema{
+			"resource_group_id": {
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+			},
+			"ids": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+				Computed: true,
+			},
+			"tags": tagsSchema(),
+			"finger_print": {
 				Type:     schema.TypeBool,
 				Optional: true,
 				Computed: true,
@@ -30,14 +42,22 @@ func dataSourceAlicloudKeyPairs() *schema.Resource {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
-
 			//Computed value
-			"key_pairs": &schema.Schema{
+			"names": {
+				Type:     schema.TypeList,
+				Computed: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+			},
+			"key_pairs": {
 				Type:     schema.TypeList,
 				Computed: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"id": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+						"resource_group_id": {
 							Type:     schema.TypeString,
 							Computed: true,
 						},
@@ -54,6 +74,7 @@ func dataSourceAlicloudKeyPairs() *schema.Resource {
 							Computed: true,
 							Elem:     &schema.Resource{Schema: outputInstancesSchema()},
 						},
+						"tags": tagsSchema(),
 					},
 				},
 			},
@@ -62,71 +83,113 @@ func dataSourceAlicloudKeyPairs() *schema.Resource {
 }
 
 func dataSourceAlicloudKeyPairsRead(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ecsconn
+	client := meta.(*connectivity.AliyunClient)
 
 	var regex *regexp.Regexp
 	if name, ok := d.GetOk("name_regex"); ok {
 		regex = regexp.MustCompile(name.(string))
 	}
-
-	args := &ecs.DescribeKeyPairsArgs{
-		RegionId: getRegion(d, meta),
+	// ids
+	idsMap := make(map[string]string)
+	if v, ok := d.GetOk("ids"); ok {
+		for _, vv := range v.([]interface{}) {
+			idsMap[vv.(string)] = vv.(string)
+		}
 	}
+	request := ecs.CreateDescribeKeyPairsRequest()
+	request.RegionId = client.RegionId
 	if fingerPrint, ok := d.GetOk("finger_print"); ok {
-		args.KeyPairFingerPrint = fingerPrint.(string)
+		request.KeyPairFingerPrint = fingerPrint.(string)
 	}
-	var keyPairs []ecs.KeyPairItemType
-	pagination := getPagination(1, 50)
-	for true {
-		args.Pagination = pagination
-		results, _, err := conn.DescribeKeyPairs(args)
-		if err != nil {
-			return fmt.Errorf("Error DescribekeyPairs: %#v", err)
-		}
-		for _, key := range results {
-			if regex == nil || (regex != nil && regex.MatchString(key.KeyPairName)) {
-				keyPairs = append(keyPairs, key)
+	if v, ok := d.GetOk("resource_group_id"); ok {
+		request.ResourceGroupId = v.(string)
+	}
+	tags := d.Get("tags").(map[string]interface{})
+	if tags != nil && len(tags) > 0 {
+		KeyPairsTags := make([]ecs.DescribeKeyPairsTag, 0, len(tags))
+		for k, v := range tags {
+			imageTag := ecs.DescribeKeyPairsTag{
+				Key:   k,
+				Value: v.(string),
 			}
+			KeyPairsTags = append(KeyPairsTags, imageTag)
 		}
-		if len(results) < pagination.PageSize {
-			break
-		}
-		pagination.PageNumber += 1
+		request.Tag = &KeyPairsTags
 	}
-
-	if len(keyPairs) < 1 {
-		return fmt.Errorf("Your query key pairs returned no results. Please change your search criteria and try again.")
-	}
-
+	request.PageNumber = requests.NewInteger(1)
+	request.PageSize = requests.NewInteger(PageSizeLarge)
+	var keyPairs []ecs.KeyPair
 	keyPairsAttach := make(map[string][]map[string]interface{})
-	pagination.PageNumber = 1
-	for true {
-		instances, _, err := conn.DescribeInstances(&ecs.DescribeInstancesArgs{
-			RegionId:   getRegion(d, meta),
-			Pagination: pagination,
+
+	for {
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.DescribeKeyPairs(request)
 		})
 		if err != nil {
-			return fmt.Errorf("Error DescribeInstances: %#v", err)
+			return WrapErrorf(err, DataDefaultErrorMsg, "alicloud_key_pairs", request.GetActionName(), AlibabaCloudSdkGoERROR)
 		}
-		for _, inst := range instances {
-			if inst.KeyPairName != "" {
-				public_ip := inst.EipAddress.IpAddress
-				if public_ip == "" && len(inst.PublicIpAddress.IpAddress) > 0 {
-					public_ip = inst.PublicIpAddress.IpAddress[0]
+		addDebug(request, raw, request.RpcRequest, request)
+		response, _ := raw.(*ecs.DescribeKeyPairsResponse)
+		if len(response.KeyPairs.KeyPair) < 1 {
+			break
+		}
+		for _, key := range response.KeyPairs.KeyPair {
+			if regex != nil && !regex.MatchString(key.KeyPairName) {
+				continue
+			}
+			if len(idsMap) > 0 {
+				if _, ok := idsMap[key.KeyPairName]; !ok {
+					continue
 				}
-				var private_ip string
+			}
+			keyPairs = append(keyPairs, key)
+			keyPairsAttach[key.KeyPairName] = make([]map[string]interface{}, 0)
+		}
+		if len(response.KeyPairs.KeyPair) < PageSizeLarge {
+			break
+		}
+		page, err := getNextpageNumber(request.PageNumber)
+		if err != nil {
+			return WrapError(err)
+		}
+		request.PageNumber = page
+	}
+
+	describeInstancesRequest := ecs.CreateDescribeInstancesRequest()
+	describeInstancesRequest.PageNumber = requests.NewInteger(1)
+	describeInstancesRequest.PageSize = requests.NewInteger(PageSizeLarge)
+
+	for {
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.DescribeInstances(describeInstancesRequest)
+		})
+		if err != nil {
+			return WrapErrorf(err, DataDefaultErrorMsg, "alicloud_key_pairs", request.GetActionName(), AlibabaCloudSdkGoERROR)
+		}
+		addDebug(describeInstancesRequest.GetActionName(), raw)
+		object, _ := raw.(*ecs.DescribeInstancesResponse)
+		if object == nil || len(object.Instances.Instance) < 1 {
+			break
+		}
+		for _, inst := range object.Instances.Instance {
+			if _, ok := keyPairsAttach[inst.KeyPairName]; ok {
+				publicIp := inst.EipAddress.IpAddress
+				if publicIp == "" && len(inst.PublicIpAddress.IpAddress) > 0 {
+					publicIp = inst.PublicIpAddress.IpAddress[0]
+				}
+				var privateIp string
 				if len(inst.InnerIpAddress.IpAddress) > 0 {
-					private_ip = inst.InnerIpAddress.IpAddress[0]
+					privateIp = inst.InnerIpAddress.IpAddress[0]
 				} else if len(inst.VpcAttributes.PrivateIpAddress.IpAddress) > 0 {
-					private_ip = inst.VpcAttributes.PrivateIpAddress.IpAddress[0]
+					privateIp = inst.VpcAttributes.PrivateIpAddress.IpAddress[0]
 				}
 				mapping := map[string]interface{}{
 					"availability_zone": inst.ZoneId,
 					"instance_id":       inst.InstanceId,
 					"instance_name":     inst.InstanceName,
 					"vswitch_id":        inst.VpcAttributes.VSwitchId,
-					"public_ip":         public_ip,
-					"private_ip":        private_ip,
+					"public_ip":         publicIp,
+					"private_ip":        privateIp,
 				}
 				if val, ok := keyPairsAttach[inst.KeyPairName]; ok {
 					val = append(val, mapping)
@@ -136,36 +199,51 @@ func dataSourceAlicloudKeyPairsRead(d *schema.ResourceData, meta interface{}) er
 				}
 			}
 		}
-		if len(instances) < pagination.PageSize {
+		if len(object.Instances.Instance) < PageSizeLarge {
 			break
 		}
-		pagination.PageNumber += 1
+
+		page, err := getNextpageNumber(describeInstancesRequest.PageNumber)
+		if err != nil {
+			return WrapError(err)
+		}
+		describeInstancesRequest.PageNumber = page
 	}
 
-	return keyPairsDescriptionAttributes(d, keyPairs, keyPairsAttach)
+	return keyPairsDescriptionAttributes(d, keyPairs, keyPairsAttach, meta)
 }
 
-func keyPairsDescriptionAttributes(d *schema.ResourceData, keyPairs []ecs.KeyPairItemType, keyPairsAttach map[string][]map[string]interface{}) error {
+func keyPairsDescriptionAttributes(d *schema.ResourceData, keyPairs []ecs.KeyPair, keyPairsAttach map[string][]map[string]interface{}, meta interface{}) error {
+	client := meta.(*connectivity.AliyunClient)
+	ecsService := EcsService{client}
 	var names []string
+	var ids []string
 	var s []map[string]interface{}
 	for _, key := range keyPairs {
 		mapping := map[string]interface{}{
-			"id":           key.KeyPairName,
-			"key_name":     key.KeyPairName,
-			"finger_print": key.KeyPairFingerPrint,
-			"instances":    keyPairsAttach[key.KeyPairName],
+			"id":                key.KeyPairName,
+			"key_name":          key.KeyPairName,
+			"finger_print":      key.KeyPairFingerPrint,
+			"resource_group_id": key.ResourceGroupId,
+			"instances":         keyPairsAttach[key.KeyPairName],
+			"tags":              ecsService.tagsToMapForKeyPair(key.Tags.Tag),
 		}
 
-		log.Printf("[DEBUG] alicloud_key_pairs - adding keypair mapping: %v", mapping)
 		names = append(names, string(key.KeyPairName))
+		ids = append(ids, string(key.KeyPairName))
 		s = append(s, mapping)
 	}
 
 	d.SetId(dataResourceIdHash(names))
 	if err := d.Set("key_pairs", s); err != nil {
-		return err
+		return WrapError(err)
 	}
-
+	if err := d.Set("names", names); err != nil {
+		return WrapError(err)
+	}
+	if err := d.Set("ids", ids); err != nil {
+		return WrapError(err)
+	}
 	// create a json file in current directory and write data source to it.
 	if output, ok := d.GetOk("output_file"); ok && output.(string) != "" {
 		writeToFile(output.(string), s)

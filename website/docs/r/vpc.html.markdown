@@ -1,4 +1,5 @@
 ---
+subcategory: "VPC"
 layout: "alicloud"
 page_title: "Alicloud: alicloud_vpc"
 sidebar_current: "docs-alicloud-resource-vpc"
@@ -10,7 +11,7 @@ description: |-
 
 Provides a VPC resource.
 
-~> **NOTE:** Terraform will auto build a router and a route table while it uses `alicloud_vpc` to build a vpc resource.
+-> **NOTE:** Terraform will auto build a router and a route table while it uses `alicloud_vpc` to build a vpc resource.
 
 ## Example Usage
 
@@ -22,13 +23,21 @@ resource "alicloud_vpc" "vpc" {
   cidr_block = "172.16.0.0/12"
 }
 ```
+
+## Module Support
+
+You can use the existing [vpc module](https://registry.terraform.io/modules/alibaba/vpc/alicloud) 
+to create a VPC and several VSwitches one-click.
+
 ## Argument Reference
 
 The following arguments are supported:
 
-* `cidr_block` - (Required, Forces new resource) The CIDR block for the VPC.
+* `cidr_block` - (Required, ForceNew) The CIDR block for the VPC.
 * `name` - (Optional) The name of the VPC. Defaults to null.
 * `description` - (Optional) The VPC description. Defaults to null.
+* `resource_group_id` - (Optional, ForceNew, Available in 1.40.0+) The Id of resource group which the VPC belongs.
+* `tags` - (Optional, Available in v1.55.3+) A mapping of tags to assign to the resource.
 
 ## Attributes Reference
 

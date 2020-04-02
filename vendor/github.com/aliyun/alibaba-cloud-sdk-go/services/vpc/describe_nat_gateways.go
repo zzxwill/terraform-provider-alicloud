@@ -76,15 +76,19 @@ func (client *Client) DescribeNatGatewaysWithCallback(request *DescribeNatGatewa
 // DescribeNatGatewaysRequest is the request struct for api DescribeNatGateways
 type DescribeNatGatewaysRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	Spec                 string           `position:"Query" name:"Spec"`
+	PageNumber           requests.Integer `position:"Query" name:"PageNumber"`
+	ResourceGroupId      string           `position:"Query" name:"ResourceGroupId"`
+	NatType              string           `position:"Query" name:"NatType"`
+	PageSize             requests.Integer `position:"Query" name:"PageSize"`
 	NatGatewayId         string           `position:"Query" name:"NatGatewayId"`
+	InstanceChargeType   string           `position:"Query" name:"InstanceChargeType"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
+	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
 	VpcId                string           `position:"Query" name:"VpcId"`
 	Name                 string           `position:"Query" name:"Name"`
-	PageNumber           requests.Integer `position:"Query" name:"PageNumber"`
-	PageSize             requests.Integer `position:"Query" name:"PageSize"`
 }
 
 // DescribeNatGatewaysResponse is the response struct for api DescribeNatGateways
@@ -102,7 +106,7 @@ func CreateDescribeNatGatewaysRequest() (request *DescribeNatGatewaysRequest) {
 	request = &DescribeNatGatewaysRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "DescribeNatGateways", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "DescribeNatGateways", "Vpc", "openAPI")
 	return
 }
 

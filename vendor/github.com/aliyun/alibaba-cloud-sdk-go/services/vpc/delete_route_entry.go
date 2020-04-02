@@ -76,20 +76,21 @@ func (client *Client) DeleteRouteEntryWithCallback(request *DeleteRouteEntryRequ
 // DeleteRouteEntryRequest is the request struct for api DeleteRouteEntry
 type DeleteRouteEntryRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer               `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string                         `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer               `position:"Query" name:"ResourceOwnerId"`
-	RouteTableId         string                         `position:"Query" name:"RouteTableId"`
-	DestinationCidrBlock string                         `position:"Query" name:"DestinationCidrBlock"`
 	NextHopId            string                         `position:"Query" name:"NextHopId"`
+	RouteTableId         string                         `position:"Query" name:"RouteTableId"`
+	ResourceOwnerAccount string                         `position:"Query" name:"ResourceOwnerAccount"`
+	DestinationCidrBlock string                         `position:"Query" name:"DestinationCidrBlock"`
 	OwnerAccount         string                         `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer               `position:"Query" name:"OwnerId"`
+	RouteEntryId         string                         `position:"Query" name:"RouteEntryId"`
 	NextHopList          *[]DeleteRouteEntryNextHopList `position:"Query" name:"NextHopList"  type:"Repeated"`
 }
 
 // DeleteRouteEntryNextHopList is a repeated param struct in DeleteRouteEntryRequest
 type DeleteRouteEntryNextHopList struct {
-	NextHopType string `name:"NextHopType"`
 	NextHopId   string `name:"NextHopId"`
+	NextHopType string `name:"NextHopType"`
 }
 
 // DeleteRouteEntryResponse is the response struct for api DeleteRouteEntry
@@ -103,7 +104,7 @@ func CreateDeleteRouteEntryRequest() (request *DeleteRouteEntryRequest) {
 	request = &DeleteRouteEntryRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "DeleteRouteEntry", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "DeleteRouteEntry", "Vpc", "openAPI")
 	return
 }
 

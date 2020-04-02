@@ -76,14 +76,14 @@ func (client *Client) AddBgpNetworkWithCallback(request *AddBgpNetworkRequest, c
 // AddBgpNetworkRequest is the request struct for api AddBgpNetwork
 type AddBgpNetworkRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	DstCidrBlock         string           `position:"Query" name:"DstCidrBlock"`
-	VpcId                string           `position:"Query" name:"VpcId"`
-	RouterId             string           `position:"Query" name:"RouterId"`
 	ClientToken          string           `position:"Query" name:"ClientToken"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
+	RouterId             string           `position:"Query" name:"RouterId"`
+	VpcId                string           `position:"Query" name:"VpcId"`
+	DstCidrBlock         string           `position:"Query" name:"DstCidrBlock"`
 }
 
 // AddBgpNetworkResponse is the response struct for api AddBgpNetwork
@@ -97,7 +97,7 @@ func CreateAddBgpNetworkRequest() (request *AddBgpNetworkRequest) {
 	request = &AddBgpNetworkRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "AddBgpNetwork", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "AddBgpNetwork", "Vpc", "openAPI")
 	return
 }
 

@@ -9,75 +9,15 @@ import (
 	"testing"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
+
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/terraform"
 	"github.com/hashicorp/terraform/helper/acctest"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/helper/schema"
-	"github.com/hashicorp/terraform/terraform"
 )
 
-func TestAccAlicloudOssBucketObject_source(t *testing.T) {
-	tmpFile, err := ioutil.TempFile("", "tf-oss-object-test-acc-source")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	// first write some data to the tempfile just so it's not 0 bytes.
-	err = ioutil.WriteFile(tmpFile.Name(), []byte("{anything will do }"), 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var obj http.Header
-	bucket := fmt.Sprintf("tf-oss-test-object-source-%d", acctest.RandInt())
-	resource.Test(t, resource.TestCase{
-		PreCheck:     func() { testAccPreCheck(t) },
-		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckAlicloudOssBucketObjectDestroy,
-		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: fmt.Sprintf(`
-						resource "alicloud_oss_bucket" "bucket" {
-						    bucket = "%s"
-						}
-						resource "alicloud_oss_bucket_object" "source" {
-							bucket = "${alicloud_oss_bucket.bucket.bucket}"
-							key = "test-object-source-key"
-							source = "%s"
-							content_type = "binary/octet-stream"
-						}`, bucket, tmpFile.Name()),
-				Check: testAccCheckAlicloudOssBucketObjectExists(
-					"alicloud_oss_bucket_object.source", bucket, obj),
-			},
-		},
-	})
-}
-
-func TestAccAlicloudOssBucketObject_content(t *testing.T) {
-	var obj http.Header
-	bucket := fmt.Sprintf("tf-object-test-object-content-%d", acctest.RandInt())
-	resource.Test(t, resource.TestCase{
-		PreCheck:     func() { testAccPreCheck(t) },
-		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckAlicloudOssBucketObjectDestroy,
-		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: fmt.Sprintf(`
-						resource "alicloud_oss_bucket" "bucket" {
-						    bucket = "%s"
-						}
-						resource "alicloud_oss_bucket_object" "content" {
-							bucket = "${alicloud_oss_bucket.bucket.bucket}"
-							key = "test-object-content-key"
-							content = "some words for test oss object content"
-						}`, bucket),
-				Check: testAccCheckAlicloudOssBucketObjectExists(
-					"alicloud_oss_bucket_object.content", bucket, obj),
-			},
-		},
-	})
-}
-
-func TestAccAlicloudOssBucketObject_acl(t *testing.T) {
+func TestAccAlicloudOssBucketObject_basic(t *testing.T) {
 	tmpFile, err := ioutil.TempFile("", "tf-oss-object-test-acc-source")
 	if err != nil {
 		t.Fatal(err)
@@ -90,37 +30,113 @@ func TestAccAlicloudOssBucketObject_acl(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var obj http.Header
-	bucket := fmt.Sprintf("tf-object-test-bucket-%d", acctest.RandInt())
-	resource.Test(t, resource.TestCase{
-		PreCheck:     func() { testAccPreCheck(t) },
-		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckAlicloudOssBucketObjectDestroy,
-		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: fmt.Sprintf(`
-						resource "alicloud_oss_bucket" "bucket" {
-							bucket = "%s"
-						}
+	var v http.Header
+	resourceId := "alicloud_oss_bucket_object.default"
+	ra := resourceAttrInit(resourceId, ossBucketObjectBasicMap)
+	testAccCheck := ra.resourceAttrMapUpdateSet()
+	rand := acctest.RandIntRange(1000000, 9999999)
+	name := fmt.Sprintf("tf-testacc-object-%d", rand)
+	testAccConfig := resourceTestAccConfigFunc(resourceId, name, resourceOssBucketObjectConfigDependence)
 
-						resource "alicloud_oss_bucket_object" "acl" {
-							bucket = "${alicloud_oss_bucket.bucket.bucket}"
-							key = "test-object-acl-key"
-							source = "%s"
-							acl = "%s"
-						}
-						`, bucket, tmpFile.Name(), "public-read"),
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+		},
+		IDRefreshName: resourceId,
+		Providers:     testAccProviders,
+		CheckDestroy:  testAccCheckAlicloudOssBucketObjectDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"bucket":       "${alicloud_oss_bucket.default.bucket}",
+					"key":          "test-object-source-key",
+					"source":       tmpFile.Name(),
+					"content_type": "binary/octet-stream",
+				}),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckAlicloudOssBucketObjectExists(
-						"alicloud_oss_bucket_object.acl", bucket, obj),
-					resource.TestCheckResourceAttr(
-						"alicloud_oss_bucket_object.acl",
-						"acl",
-						"public-read"),
+						"alicloud_oss_bucket_object.default", name, v),
+					testAccCheck(map[string]string{
+						"bucket": name,
+						"source": tmpFile.Name(),
+					}),
+				),
+			},
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"source":  REMOVEKEY,
+					"content": "some words for test oss object content",
+				}),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAlicloudOssBucketObjectExists(
+						"alicloud_oss_bucket_object.default", name, v),
+					testAccCheck(map[string]string{
+						"source":  REMOVEKEY,
+						"content": "some words for test oss object content",
+					}),
+				),
+			},
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"acl": "public-read",
+				}),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheck(map[string]string{
+						"acl": "public-read",
+					}),
+				),
+			},
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"server_side_encryption": "KMS",
+					"kms_key_id":             "423a0d8a-0c28-4899-be56-32217cb95e88",
+				}),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheck(map[string]string{}),
+				),
+			},
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"bucket":                 "${alicloud_oss_bucket.default.bucket}",
+					"server_side_encryption": "AES256",
+					"kms_key_id":             REMOVEKEY,
+					"key":                    "test-object-source-key",
+					"content":                REMOVEKEY,
+					"source":                 tmpFile.Name(),
+					"content_type":           "binary/octet-stream",
+					"acl":                    REMOVEKEY,
+				}),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAlicloudOssBucketObjectExists(
+						"alicloud_oss_bucket_object.default", name, v),
+					testAccCheck(map[string]string{
+						"bucket":       name,
+						"key":          "test-object-source-key",
+						"content":      REMOVEKEY,
+						"source":       tmpFile.Name(),
+						"content_type": "binary/octet-stream",
+						"acl":          "private",
+					}),
 				),
 			},
 		},
 	})
+}
+
+func resourceOssBucketObjectConfigDependence(name string) string {
+
+	return fmt.Sprintf(`
+resource "alicloud_oss_bucket" "default" {
+	bucket = "%s"
+}`, name)
+}
+
+var ossBucketObjectBasicMap = map[string]string{
+	"bucket":       CHECKSET,
+	"key":          "test-object-source-key",
+	"source":       CHECKSET,
+	"content_type": "binary/octet-stream",
+	"acl":          "private",
 }
 
 func testAccCheckAlicloudOssBucketObjectExists(n string, bucket string, obj http.Header) resource.TestCheckFunc {
@@ -142,11 +158,15 @@ func testAccCheckOssBucketObjectExistsWithProviders(n string, bucket string, obj
 			if provider.Meta() == nil {
 				continue
 			}
-			client, err := provider.Meta().(*AliyunClient).ossconn.Bucket(bucket)
+			client := provider.Meta().(*connectivity.AliyunClient)
+			raw, err := client.WithOssClient(func(ossClient *oss.Client) (interface{}, error) {
+				return ossClient.Bucket(bucket)
+			})
+			buck, _ := raw.(*oss.Bucket)
 			if err != nil {
 				return fmt.Errorf("Error getting bucket: %#v", err)
 			}
-			object, err := client.GetObjectMeta(rs.Primary.ID)
+			object, err := buck.GetObjectMeta(rs.Primary.ID)
 			log.Printf("[WARN]get oss bucket object %#v", bucket)
 			if err == nil {
 				if object != nil {
@@ -168,28 +188,43 @@ func testAccCheckAlicloudOssBucketObjectDestroy(s *terraform.State) error {
 }
 
 func testAccCheckOssBucketObjectDestroyWithProvider(s *terraform.State, provider *schema.Provider) error {
-	client := provider.Meta().(*AliyunClient)
-
+	client := provider.Meta().(*connectivity.AliyunClient)
+	var bucket *oss.Bucket
 	for _, rs := range s.RootModule().Resources {
 		if rs.Type != "alicloud_oss_bucket" {
 			continue
 		}
-
-		// Try to find the resource
-		bucket, err := client.QueryOssBucketById(rs.Primary.ID)
-		if err == nil {
-			if bucket.Name != "" {
-				return fmt.Errorf("Found instance: %s", bucket.Name)
-			}
+		raw, err := client.WithOssClient(func(ossClient *oss.Client) (interface{}, error) {
+			return ossClient.Bucket(rs.Primary.ID)
+		})
+		if err != nil {
+			return fmt.Errorf("Error getting bucket: %#v", err)
 		}
+		bucket, _ = raw.(*oss.Bucket)
+	}
+	if bucket == nil {
+		return nil
+	}
 
-		// Verify the error is what we want
-		e, _ := err.(oss.ServiceError)
-		if e.Code == OssBucketNotFound {
+	for _, rs := range s.RootModule().Resources {
+		if rs.Type != "alicloud_oss_bucket_object" {
 			continue
 		}
 
-		return err
+		// Try to find the resource
+		exist, err := bucket.IsObjectExist(rs.Primary.ID)
+		if err != nil {
+			if IsExpectedErrors(err, []string{"NoSuchBucket"}) {
+				return nil
+			}
+			return fmt.Errorf("IsObjectExist got an error: %#v", err)
+		}
+
+		if !exist {
+			return nil
+		}
+
+		return fmt.Errorf("Found oss object: %s", rs.Primary.ID)
 	}
 
 	return nil

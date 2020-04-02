@@ -3,139 +3,18 @@ package alicloud
 import (
 	"fmt"
 	"testing"
-	"time"
+
+	"github.com/hashicorp/terraform/helper/acctest"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/vpc"
-	"github.com/denverdino/aliyungo/ecs"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/terraform"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
-func TestAccAlicloudEIPAssociation(t *testing.T) {
-	var asso vpc.EipAddress
-	var inst ecs.InstanceAttributesType
-
-	resource.Test(t, resource.TestCase{
-		PreCheck: func() {
-			testAccPreCheck(t)
-		},
-
-		// module name
-		IDRefreshName: "alicloud_eip_association.foo",
-
-		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckEIPAssociationDestroy,
-		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccEIPAssociationConfig,
-				Check: resource.ComposeTestCheckFunc(
-					testAccCheckInstanceExists(
-						"alicloud_instance.instance", &inst),
-					testAccCheckEIPExists(
-						"alicloud_eip.eip", &asso),
-					testAccCheckEIPAssociationExists(
-						"alicloud_eip_association.foo", &inst, &asso),
-				),
-			},
-		},
-	})
-
-}
-
-func TestAccAlicloudEIPAssociation_natgateway(t *testing.T) {
-	var asso vpc.EipAddress
-	var nat vpc.NatGateway
-
-	resource.Test(t, resource.TestCase{
-		PreCheck: func() {
-			testAccPreCheck(t)
-		},
-
-		// module name
-		IDRefreshName: "alicloud_eip_association.foo.1",
-
-		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckEIPAssociationDestroy,
-		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccEIPAssociationNatgateway,
-				Check: resource.ComposeTestCheckFunc(
-					testAccCheckNatGatewayExists(
-						"alicloud_nat_gateway.default", &nat),
-					testAccCheckEIPExists(
-						"alicloud_eip.eip.1", &asso),
-					testAccCheckEIPAssociationNatExists(
-						"alicloud_eip_association.foo.1", &nat, &asso),
-				),
-			},
-		},
-	})
-
-}
-
-func testAccCheckEIPAssociationExists(n string, instance *ecs.InstanceAttributesType, eip *vpc.EipAddress) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[n]
-		if !ok {
-			return fmt.Errorf("Not found: %s", n)
-		}
-
-		if rs.Primary.ID == "" {
-			return fmt.Errorf("No EIP Association ID is set")
-		}
-
-		client := testAccProvider.Meta().(*AliyunClient)
-		return resource.Retry(3*time.Minute, func() *resource.RetryError {
-			d, err := client.DescribeEipAddress(rs.Primary.Attributes["allocation_id"])
-
-			if err != nil {
-				return resource.NonRetryableError(err)
-			}
-			if d.Status != string(InUse) {
-				return resource.RetryableError(fmt.Errorf("Eip is in associating - trying again while it associates"))
-			} else if d.InstanceId == instance.InstanceId {
-				*eip = d
-				return nil
-			}
-
-			return resource.NonRetryableError(fmt.Errorf("EIP Association not found"))
-		})
-	}
-}
-
-func testAccCheckEIPAssociationNatExists(n string, nat *vpc.NatGateway, eip *vpc.EipAddress) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[n]
-		if !ok {
-			return fmt.Errorf("Not found: %s", n)
-		}
-
-		if rs.Primary.ID == "" {
-			return fmt.Errorf("No EIP Association ID is set")
-		}
-
-		client := testAccProvider.Meta().(*AliyunClient)
-		return resource.Retry(3*time.Minute, func() *resource.RetryError {
-			d, err := client.DescribeEipAddress(rs.Primary.Attributes["allocation_id"])
-
-			if err != nil {
-				return resource.NonRetryableError(err)
-			}
-
-			if d.Status != string(InUse) {
-				return resource.RetryableError(fmt.Errorf("Eip is in associating - trying again while it associates"))
-			} else if d.InstanceId == nat.NatGatewayId {
-				*eip = d
-				return nil
-			}
-
-			return resource.NonRetryableError(fmt.Errorf("EIP Association not found"))
-		})
-	}
-}
-
 func testAccCheckEIPAssociationDestroy(s *terraform.State) error {
-	client := testAccProvider.Meta().(*AliyunClient)
+	client := testAccProvider.Meta().(*connectivity.AliyunClient)
+	vpcService := VpcService{client}
 
 	for _, rs := range s.RootModule().Resources {
 		if rs.Type != "alicloud_eip_association" {
@@ -143,106 +22,308 @@ func testAccCheckEIPAssociationDestroy(s *terraform.State) error {
 		}
 
 		if rs.Primary.ID == "" {
-			return fmt.Errorf("No EIP Association ID is set")
+			return WrapError(Error("No EIP Association ID is set"))
 		}
 
 		// Try to find the EIP
-		eips, _, err := client.ecsconn.DescribeEipAddresses(&ecs.DescribeEipAddressesArgs{
-			RegionId:     client.Region,
-			AllocationId: rs.Primary.Attributes["allocation_id"],
-		})
-
-		for _, eip := range eips {
-			if eip.Status != ecs.EipStatusAvailable {
-				return fmt.Errorf("Error EIP Association still exist")
-			}
-		}
+		_, err := vpcService.DescribeEipAssociation(rs.Primary.ID)
 
 		// Verify the error is what we want
 		if err != nil {
-			return err
+			if NotFoundError(err) {
+				continue
+			}
+			return WrapError(err)
 		}
 	}
 
 	return nil
 }
 
-const testAccEIPAssociationConfig = `
-data "alicloud_zones" "default" {
-  "available_resource_creation"= "VSwitch"
+func TestAccAlicloudEipAssociationBasic(t *testing.T) {
+	var v vpc.EipAddress
+	resourceId := "alicloud_eip_association.default"
+	ra := resourceAttrInit(resourceId, testAccCheckEipAssociationBasicMap)
+	serviceFunc := func() interface{} {
+		return &VpcService{testAccProvider.Meta().(*connectivity.AliyunClient)}
+	}
+	rc := resourceCheckInit(resourceId, &v, serviceFunc)
+	rac := resourceAttrCheckInit(rc, ra)
+
+	rand := acctest.RandInt()
+	testAccCheck := rac.resourceAttrMapUpdateSet()
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+		},
+
+		// module name
+		IDRefreshName: resourceId,
+
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckEIPAssociationDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccEIPAssociationConfigBaisc(rand),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheck(nil),
+				),
+			},
+		},
+	})
 }
 
-resource "alicloud_vpc" "main" {
+func TestAccAlicloudEipAssociationMulti(t *testing.T) {
+	var v vpc.EipAddress
+	resourceId := "alicloud_eip_association.default.1"
+	ra := resourceAttrInit(resourceId, testAccCheckEipAssociationBasicMap)
+	serviceFunc := func() interface{} {
+		return &VpcService{testAccProvider.Meta().(*connectivity.AliyunClient)}
+	}
+	rc := resourceCheckInit(resourceId, &v, serviceFunc)
+	rac := resourceAttrCheckInit(rc, ra)
+
+	rand := acctest.RandInt()
+	testAccCheck := rac.resourceAttrMapUpdateSet()
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+		},
+
+		// module name
+		IDRefreshName: resourceId,
+
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckEIPAssociationDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccEIPAssociationConfigMulti(rand),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheck(nil),
+				),
+			},
+		},
+	})
+}
+
+func TestAccAlicloudEipAssociationEni(t *testing.T) {
+	var v vpc.EipAddress
+	resourceId := "alicloud_eip_association.default"
+	ra := resourceAttrInit(resourceId, testAccCheckEipAssociationBasicMap)
+	serviceFunc := func() interface{} {
+		return &VpcService{testAccProvider.Meta().(*connectivity.AliyunClient)}
+	}
+	rc := resourceCheckInit(resourceId, &v, serviceFunc)
+	rac := resourceAttrCheckInit(rc, ra)
+
+	rand := acctest.RandInt()
+	testAccCheck := rac.resourceAttrMapUpdateSet()
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+		},
+
+		// module name
+		IDRefreshName: resourceId,
+
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckEIPAssociationDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccEIPAssociationConfigEni(rand),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheck(map[string]string{
+						"instance_type":      "NetworkInterface",
+						"private_ip_address": "192.168.0.2",
+					}),
+				),
+			},
+		},
+	})
+}
+
+func testAccEIPAssociationConfigBaisc(rand int) string {
+	return fmt.Sprintf(`
+data "alicloud_zones" "default" {
+}
+
+data "alicloud_instance_types" "default" {
+ 	availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+}
+
+data "alicloud_images" "default" {
+	name_regex = "^ubuntu_18.*64"
+	most_recent = true
+	owners = "system"
+}
+
+variable "name" {
+	default = "tf-testAccEipAssociation%d"
+}
+
+resource "alicloud_vpc" "default" {
+  name = "${var.name}"
   cidr_block = "10.1.0.0/21"
 }
 
-resource "alicloud_vswitch" "main" {
-  vpc_id = "${alicloud_vpc.main.id}"
+resource "alicloud_vswitch" "default" {
+  vpc_id = "${alicloud_vpc.default.id}"
   cidr_block = "10.1.1.0/24"
   availability_zone = "${data.alicloud_zones.default.zones.0.id}"
-  depends_on = [
-    "alicloud_vpc.main"]
+  name = "${var.name}"
 }
 
-resource "alicloud_instance" "instance" {
-  # cn-beijing
-  vswitch_id = "${alicloud_vswitch.main.id}"
-  image_id = "ubuntu_140405_32_40G_cloudinit_20161115.vhd"
+resource "alicloud_security_group" "default" {
+  name = "${var.name}"
+  description = "New security group"
+  vpc_id = "${alicloud_vpc.default.id}"
+}
 
-  # series III
-  instance_type = "ecs.n4.large"
-  system_disk_category = "cloud_efficiency"
+resource "alicloud_instance" "default" {
+  vswitch_id = "${alicloud_vswitch.default.id}"
+  image_id = "${data.alicloud_images.default.images.0.id}"
+  availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+  system_disk_category = "cloud_ssd"
+  instance_type = "${data.alicloud_instance_types.default.instance_types.0.id}"
 
-  security_groups = ["${alicloud_security_group.group.id}"]
-  instance_name = "test_foo"
-
-  tags {
+  security_groups = ["${alicloud_security_group.default.id}"]
+  instance_name = "${var.name}"
+  tags = {
     Name = "TerraformTest-instance"
   }
 }
 
-resource "alicloud_eip" "eip" {
+resource "alicloud_eip" "default" {
+	name = "${var.name}"
 }
 
-resource "alicloud_eip_association" "foo" {
-  allocation_id = "${alicloud_eip.eip.id}"
-  instance_id = "${alicloud_instance.instance.id}"
+resource "alicloud_eip_association" "default" {
+  allocation_id = "${alicloud_eip.default.id}"
+  instance_id = "${alicloud_instance.default.id}"
+}
+`, rand)
 }
 
-resource "alicloud_security_group" "group" {
-  name = "terraform-test-group"
-  description = "New security group"
-  vpc_id = "${alicloud_vpc.main.id}"
-}
-`
-const testAccEIPAssociationNatgateway = `
+func testAccEIPAssociationConfigMulti(rand int) string {
+	return fmt.Sprintf(`
 data "alicloud_zones" "default" {
-  "available_resource_creation"= "VSwitch"
 }
 
-resource "alicloud_vpc" "main" {
+data "alicloud_instance_types" "default" {
+ 	availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+}
+
+data "alicloud_images" "default" {
+	name_regex = "^ubuntu_18.*64"
+	most_recent = true
+	owners = "system"
+}
+
+variable "name" {
+	default = "tf-testAccEipAssociation%d"
+}
+
+variable "number" {
+		default = "2"
+}
+
+resource "alicloud_vpc" "default" {
+  name = "${var.name}"
   cidr_block = "10.1.0.0/21"
 }
 
-resource "alicloud_vswitch" "main" {
-  vpc_id = "${alicloud_vpc.main.id}"
+resource "alicloud_vswitch" "default" {
+  vpc_id = "${alicloud_vpc.default.id}"
   cidr_block = "10.1.1.0/24"
   availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+  name = "${var.name}"
 }
 
-resource "alicloud_eip" "eip" {
-  count = 2
+resource "alicloud_security_group" "default" {
+  name = "${var.name}"
+  description = "New security group"
+  vpc_id = "${alicloud_vpc.default.id}"
 }
 
-resource "alicloud_eip_association" "foo" {
-  count = 2
-  allocation_id = "${element(alicloud_eip.eip.*.id, count.index)}"
-  instance_id = "${alicloud_nat_gateway.default.id}"
+resource "alicloud_instance" "default" {
+  count = "${var.number}"
+  vswitch_id = "${alicloud_vswitch.default.id}"
+  image_id = "${data.alicloud_images.default.images.0.id}"
+  availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+  system_disk_category = "cloud_ssd"
+  instance_type = "${data.alicloud_instance_types.default.instance_types.0.id}"
+
+  security_groups = ["${alicloud_security_group.default.id}"]
+  instance_name = "${var.name}"
+  tags = {
+    Name = "TerraformTest-instance"
+  }
 }
 
-resource "alicloud_nat_gateway" "default" {
-  vpc_id = "${alicloud_vpc.main.id}"
-  specification = "Small"
-  name = "test-eip"
+resource "alicloud_eip" "default" {
+	count = "${var.number}"
+	name = "${var.name}"
 }
-`
+
+resource "alicloud_eip_association" "default" {
+  count = "${var.number}"
+  allocation_id = "${element(alicloud_eip.default.*.id,count.index)}"
+  instance_id = "${element(alicloud_instance.default.*.id,count.index)}"
+}
+`, rand)
+}
+
+func testAccEIPAssociationConfigEni(rand int) string {
+	return fmt.Sprintf(`
+variable "name" {
+  default = "tf-testAccEipAssociation%d"
+}
+
+resource "alicloud_vpc" "default" {
+    name = "${var.name}"
+    cidr_block = "192.168.0.0/24"
+}
+
+data "alicloud_zones" "default" {
+    available_resource_creation= "VSwitch"
+}
+
+resource "alicloud_vswitch" "default" {
+    name = "${var.name}"
+    cidr_block = "192.168.0.0/24"
+    availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+    vpc_id = "${alicloud_vpc.default.id}"
+}
+
+resource "alicloud_security_group" "default" {
+    name = "${var.name}"
+    vpc_id = "${alicloud_vpc.default.id}"
+}
+
+resource "alicloud_network_interface" "default" {
+	name = "${var.name}"
+    vswitch_id = "${alicloud_vswitch.default.id}"
+	security_groups = [ "${alicloud_security_group.default.id}" ]
+	private_ip = "192.168.0.2"
+}
+
+resource "alicloud_eip" "default" {
+	name = "${var.name}"
+}
+
+resource "alicloud_eip_association" "default" {
+  allocation_id = "${alicloud_eip.default.id}"
+  instance_id = "${alicloud_network_interface.default.id}"
+  instance_type = "NetworkInterface"
+  private_ip_address = "192.168.0.2"
+}
+`, rand)
+}
+
+var testAccCheckEipAssociationBasicMap = map[string]string{
+	"allocation_id": CHECKSET,
+	"instance_id":   CHECKSET,
+}

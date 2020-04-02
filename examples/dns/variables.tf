@@ -1,4 +1,4 @@
-variable "count" {
+variable "number" {
   default = "1"
 }
 
@@ -9,3 +9,4 @@ variable "group_name" {
 variable "domain_name" {
   default = "starmove.com"
 }
+

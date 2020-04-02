@@ -1,41 +1,55 @@
 package alicloud
 
 import (
-	"fmt"
 	"io/ioutil"
 	"strings"
 	"time"
 
-	"github.com/denverdino/aliyungo/ecs"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+
+	"os"
+
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
+
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 )
 
 func resourceAlicloudKeyPair() *schema.Resource {
 	return &schema.Resource{
 		Create: resourceAlicloudKeyPairCreate,
 		Read:   resourceAlicloudKeyPairRead,
+		Update: resourceAlicloudKeyPairUpdate,
 		Delete: resourceAlicloudKeyPairDelete,
 		Importer: &schema.ResourceImporter{
 			State: schema.ImportStatePassthrough,
 		},
 
 		Schema: map[string]*schema.Schema{
-			"key_name": &schema.Schema{
+			"key_name": {
 				Type:          schema.TypeString,
 				Optional:      true,
 				Computed:      true,
 				ForceNew:      true,
-				ValidateFunc:  validateKeyPairName,
+				ValidateFunc:  validation.StringLenBetween(2, 128),
 				ConflictsWith: []string{"key_name_prefix"},
 			},
-			"key_name_prefix": &schema.Schema{
+			"key_name_prefix": {
 				Type:         schema.TypeString,
 				Optional:     true,
 				ForceNew:     true,
-				ValidateFunc: validateKeyPairPrefix,
+				ValidateFunc: validation.StringLenBetween(0, 100),
 			},
-			"public_key": &schema.Schema{
+			"resource_group_id": {
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+				DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+					return d.Get("public_key").(string) != ""
+				},
+			},
+			"public_key": {
 				Type:     schema.TypeString,
 				Optional: true,
 				ForceNew: true,
@@ -48,21 +62,22 @@ func resourceAlicloudKeyPair() *schema.Resource {
 					}
 				},
 			},
-			"key_file": &schema.Schema{
+			"key_file": {
 				Type:     schema.TypeString,
 				Optional: true,
 				ForceNew: true,
 			},
-			"finger_print": &schema.Schema{
+			"finger_print": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
+			"tags": tagsSchema(),
 		},
 	}
 }
 
 func resourceAlicloudKeyPairCreate(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ecsconn
+	client := meta.(*connectivity.AliyunClient)
 
 	var keyName string
 	if v, ok := d.GetOk("key_name"); ok {
@@ -74,105 +89,97 @@ func resourceAlicloudKeyPairCreate(d *schema.ResourceData, meta interface{}) err
 	}
 
 	if publicKey, ok := d.GetOk("public_key"); ok {
-		keypair, err := conn.ImportKeyPair(&ecs.ImportKeyPairArgs{
-			RegionId:      getRegion(d, meta),
-			KeyPairName:   keyName,
-			PublicKeyBody: publicKey.(string),
+		request := ecs.CreateImportKeyPairRequest()
+		request.RegionId = client.RegionId
+		request.KeyPairName = keyName
+		request.PublicKeyBody = publicKey.(string)
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.ImportKeyPair(request)
 		})
 		if err != nil {
-			return fmt.Errorf("Error Import KeyPair: %s", err)
+			return WrapErrorf(err, DefaultErrorMsg, "alicloud_key_pair", request.GetActionName(), AlibabaCloudSdkGoERROR)
 		}
-
-		d.SetId(keypair.KeyPairName)
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		object, _ := raw.(*ecs.ImportKeyPairResponse)
+		d.SetId(object.KeyPairName)
 	} else {
-		keypair, err := conn.CreateKeyPair(&ecs.CreateKeyPairArgs{
-			RegionId:    getRegion(d, meta),
-			KeyPairName: keyName,
+		request := ecs.CreateCreateKeyPairRequest()
+		request.RegionId = client.RegionId
+		request.KeyPairName = keyName
+		if v, ok := d.GetOk("resource_group_id"); ok && v.(string) != "" {
+			request.ResourceGroupId = v.(string)
+		}
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.CreateKeyPair(request)
 		})
 		if err != nil {
-			return fmt.Errorf("Error Create KeyPair: %s", err)
+			return WrapErrorf(err, DefaultErrorMsg, "alicloud_key_pair", request.GetActionName(), AlibabaCloudSdkGoERROR)
 		}
-
-		d.SetId(keypair.KeyPairName)
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		keyPair, _ := raw.(*ecs.CreateKeyPairResponse)
+		d.SetId(keyPair.KeyPairName)
 		if file, ok := d.GetOk("key_file"); ok {
-			ioutil.WriteFile(file.(string), []byte(keypair.PrivateKeyBody), 400)
+			ioutil.WriteFile(file.(string), []byte(keyPair.PrivateKeyBody), 0600)
+			os.Chmod(file.(string), 0400)
 		}
 	}
 
+	return resourceAlicloudKeyPairUpdate(d, meta)
+}
+func resourceAlicloudKeyPairUpdate(d *schema.ResourceData, meta interface{}) error {
+	client := meta.(*connectivity.AliyunClient)
+	err := setTags(client, TagResourceKeypair, d)
+	if err != nil {
+		return WrapError(err)
+	}
 	return resourceAlicloudKeyPairRead(d, meta)
 }
 
 func resourceAlicloudKeyPairRead(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ecsconn
+	client := meta.(*connectivity.AliyunClient)
+	ecsService := EcsService{client}
 
-	keypairs, _, err := conn.DescribeKeyPairs(&ecs.DescribeKeyPairsArgs{
-		RegionId:    getRegion(d, meta),
-		KeyPairName: d.Id(),
-	})
+	keyPair, err := ecsService.DescribeKeyPair(d.Id())
 	if err != nil {
-		if IsExceptedError(err, KeyPairNotFound) {
+		if NotFoundError(err) || IsExpectedErrors(err, []string{"InvalidKeyPair.NotFound"}) {
 			d.SetId("")
 			return nil
 		}
-		return fmt.Errorf("Error Retrieving KeyPair: %s", err)
+		return WrapError(err)
 	}
-
-	if len(keypairs) > 0 {
-		d.Set("key_name", keypairs[0].KeyPairName)
-		d.Set("fingerprint", keypairs[0].KeyPairFingerPrint)
-		return nil
+	d.Set("key_name", keyPair.KeyPairName)
+	d.Set("resource_group_id", keyPair.ResourceGroupId)
+	d.Set("finger_print", keyPair.KeyPairFingerPrint)
+	tags := keyPair.Tags.Tag
+	if len(tags) > 0 {
+		err = d.Set("tags", ecsService.tagsToMapForKeyPair(tags))
 	}
-
-	return fmt.Errorf("Unable to find key pair within: %#v", keypairs)
+	return nil
 }
 
 func resourceAlicloudKeyPairDelete(d *schema.ResourceData, meta interface{}) error {
-	client := meta.(*AliyunClient)
+	client := meta.(*connectivity.AliyunClient)
+	ecsService := EcsService{client}
 
-	instance_ids, _, err := client.QueryInstancesWithKeyPair(getRegion(d, meta), "", d.Id())
-	if err != nil {
-		return err
-	}
-	detachArgs := &ecs.DetachKeyPairArgs{
-		RegionId:    getRegion(d, meta),
-		KeyPairName: d.Id(),
-	}
+	request := ecs.CreateDeleteKeyPairsRequest()
+	request.RegionId = client.RegionId
+	request.KeyPairNames = convertListToJsonString(append(make([]interface{}, 0, 1), d.Id()))
 
-	return resource.Retry(5*time.Minute, func() *resource.RetryError {
-
-		// Detach keypair from its all instances before removing it.
-		if len(instance_ids) > 0 {
-			detachArgs.InstanceIds = convertListToJsonString(instance_ids)
-			if err := client.ecsconn.DetachKeyPair(detachArgs); err != nil {
-				return resource.NonRetryableError(fmt.Errorf("Error DetachKeyPair:%#v", err))
-			}
-		}
-		instance_ids, _, err = client.QueryInstancesWithKeyPair(getRegion(d, meta), "", d.Id())
-		if err != nil {
-			return resource.NonRetryableError(err)
-		}
-		if len(instance_ids) > 0 {
-			return resource.RetryableError(fmt.Errorf("Delete Key Pair timeout and got an error: %#v.", err))
-		}
-
-		err := client.ecsconn.DeleteKeyPairs(&ecs.DeleteKeyPairsArgs{
-			RegionId:     getRegion(d, meta),
-			KeyPairNames: convertListToJsonString(append(make([]interface{}, 0, 1), d.Id())),
+	err := resource.Retry(5*time.Minute, func() *resource.RetryError {
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.DeleteKeyPairs(request)
 		})
 		if err != nil {
-			if IsExceptedError(err, KeyPairNotFound) {
+			if IsExpectedErrors(err, []string{"InvalidKeyPair.NotFound"}) {
 				return nil
 			}
+			return resource.RetryableError(err)
 		}
-
-		keypairs, _, err := client.ecsconn.DescribeKeyPairs(&ecs.DescribeKeyPairsArgs{
-			RegionId:    getRegion(d, meta),
-			KeyPairName: d.Id(),
-		})
-		if len(keypairs) > 0 {
-			return resource.RetryableError(fmt.Errorf("Delete Key Pair timeout and got an error: %#v.", err))
-		}
-
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
 		return nil
 	})
+	if err != nil {
+		WrapErrorf(err, DefaultErrorMsg, d.Id(), request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	return WrapError(ecsService.WaitForKeyPair(d.Id(), Deleted, DefaultTimeoutMedium))
 }

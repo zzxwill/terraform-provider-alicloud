@@ -76,13 +76,13 @@ func (client *Client) ModifyCommonBandwidthPackageAttributeWithCallback(request 
 // ModifyCommonBandwidthPackageAttributeRequest is the request struct for api ModifyCommonBandwidthPackageAttribute
 type ModifyCommonBandwidthPackageAttributeRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
-	BandwidthPackageId   string           `position:"Query" name:"BandwidthPackageId"`
-	Name                 string           `position:"Query" name:"Name"`
 	Description          string           `position:"Query" name:"Description"`
+	BandwidthPackageId   string           `position:"Query" name:"BandwidthPackageId"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
+	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
+	Name                 string           `position:"Query" name:"Name"`
 }
 
 // ModifyCommonBandwidthPackageAttributeResponse is the response struct for api ModifyCommonBandwidthPackageAttribute
@@ -96,7 +96,7 @@ func CreateModifyCommonBandwidthPackageAttributeRequest() (request *ModifyCommon
 	request = &ModifyCommonBandwidthPackageAttributeRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "ModifyCommonBandwidthPackageAttribute", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "ModifyCommonBandwidthPackageAttribute", "Vpc", "openAPI")
 	return
 }
 

@@ -8,10 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"github.com/mitchellh/go-homedir"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 func resourceAlicloudOssBucketObject() *schema.Resource {
@@ -50,7 +52,7 @@ func resourceAlicloudOssBucketObject() *schema.Resource {
 				Type:         schema.TypeString,
 				Default:      oss.ACLPrivate,
 				Optional:     true,
-				ValidateFunc: validateOssBucketAcl,
+				ValidateFunc: validation.StringInSlice([]string{"private", "public-read", "public-read-write"}, false),
 			},
 
 			"content_type": {
@@ -90,13 +92,28 @@ func resourceAlicloudOssBucketObject() *schema.Resource {
 			},
 
 			"server_side_encryption": {
-				Type:         schema.TypeString,
-				Optional:     true,
-				ValidateFunc: validateOssBucketObjectServerSideEncryption,
-				Computed:     true,
+				Type:     schema.TypeString,
+				Optional: true,
+				ValidateFunc: validation.StringInSlice([]string{
+					string(ServerSideEncryptionKMS), string(ServerSideEncryptionAes256),
+				}, false),
+				Default: ServerSideEncryptionAes256,
+			},
+
+			"kms_key_id": {
+				Type:     schema.TypeString,
+				Optional: true,
+				DiffSuppressFunc: func(k, old, new string, d *schema.ResourceData) bool {
+					return ServerSideEncryptionKMS != d.Get("server_side_encryption").(string)
+				},
 			},
 
 			"etag": {
+				Type:     schema.TypeString,
+				Computed: true,
+			},
+
+			"version_id": {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
@@ -105,12 +122,17 @@ func resourceAlicloudOssBucketObject() *schema.Resource {
 }
 
 func resourceAlicloudOssBucketObjectPut(d *schema.ResourceData, meta interface{}) error {
-
-	bucket, err := meta.(*AliyunClient).ossconn.Bucket(d.Get("bucket").(string))
+	client := meta.(*connectivity.AliyunClient)
+	var requestInfo *oss.Client
+	raw, err := client.WithOssClient(func(ossClient *oss.Client) (interface{}, error) {
+		requestInfo = ossClient
+		return ossClient.Bucket(d.Get("bucket").(string))
+	})
 	if err != nil {
-		return fmt.Errorf("Error getting bucket: %#v", err)
+		return WrapErrorf(err, DefaultErrorMsg, "alicloud_oss_bucket_object", "Bucket", AliyunOssGoSdk)
 	}
-
+	addDebug("Bucket", raw, requestInfo, map[string]string{"bucketName": d.Get("bucket").(string)})
+	bucket, _ := raw.(*oss.Bucket)
 	var filePath string
 	var body io.Reader
 
@@ -118,7 +140,7 @@ func resourceAlicloudOssBucketObjectPut(d *schema.ResourceData, meta interface{}
 		source := v.(string)
 		path, err := homedir.Expand(source)
 		if err != nil {
-			return fmt.Errorf("Error expanding homedir in source (%s): %s", source, err)
+			return WrapError(err)
 		}
 
 		filePath = path
@@ -126,13 +148,22 @@ func resourceAlicloudOssBucketObjectPut(d *schema.ResourceData, meta interface{}
 		content := v.(string)
 		body = bytes.NewReader([]byte(content))
 	} else {
-		return fmt.Errorf("[ERROR] Must specify \"source\" or \"content\" field")
+		return WrapError(Error("[ERROR] Must specify \"source\" or \"content\" field"))
 	}
 
 	key := d.Get("key").(string)
 	options, err := buildObjectHeaderOptions(d)
+
+	if v, ok := d.GetOk("server_side_encryption"); ok {
+		options = append(options, oss.ServerSideEncryption(v.(string)))
+	}
+
+	if v, ok := d.GetOk("kms_key_id"); ok {
+		options = append(options, oss.ServerSideEncryptionKeyID(v.(string)))
+	}
+
 	if err != nil {
-		return err
+		return WrapError(err)
 	}
 	if filePath != "" {
 		err = bucket.PutObjectFromFile(key, filePath, options...)
@@ -143,7 +174,7 @@ func resourceAlicloudOssBucketObjectPut(d *schema.ResourceData, meta interface{}
 	}
 
 	if err != nil {
-		return fmt.Errorf("Error putting object in Oss bucket (%#v): %s", bucket, err)
+		return WrapError(Error("Error putting object in Oss bucket (%#v): %s", bucket, err))
 	}
 
 	d.SetId(key)
@@ -151,27 +182,34 @@ func resourceAlicloudOssBucketObjectPut(d *schema.ResourceData, meta interface{}
 }
 
 func resourceAlicloudOssBucketObjectRead(d *schema.ResourceData, meta interface{}) error {
-	bucket, err := meta.(*AliyunClient).ossconn.Bucket(d.Get("bucket").(string))
+	client := meta.(*connectivity.AliyunClient)
+	var requestInfo *oss.Client
+	raw, err := client.WithOssClient(func(ossClient *oss.Client) (interface{}, error) {
+		requestInfo = ossClient
+		return ossClient.Bucket(d.Get("bucket").(string))
+	})
 	if err != nil {
-		return fmt.Errorf("Error getting bucket: %#v", err)
+		return WrapErrorf(err, DefaultErrorMsg, d.Id(), "Bucket", AliyunOssGoSdk)
 	}
-
+	addDebug("Bucket", raw, requestInfo, map[string]string{"bucketName": d.Get("bucket").(string)})
+	bucket, _ := raw.(*oss.Bucket)
 	options, err := buildObjectHeaderOptions(d)
 	if err != nil {
-		return fmt.Errorf("Error building object header options: %#v", err)
+		return WrapError(err)
 	}
 
 	object, err := bucket.GetObjectDetailedMeta(d.Get("key").(string), options...)
 	if err != nil {
-		if strings.Contains(string(err.Error()), OssBodyNotFound) {
+		if IsExpectedErrors(err, []string{"404 Not Found"}) {
 			d.SetId("")
-			return fmt.Errorf("To get the Object: %#v but it is not exist in the specified bucket %s.", d.Get("key").(string), d.Get("bucket").(string))
+			return WrapError(Error("To get the Object: %#v but it is not exist in the specified bucket %s.", d.Get("key").(string), d.Get("bucket").(string)))
 		}
-
-		return fmt.Errorf("Error Reading Object: %#v", err)
+		return WrapErrorf(err, DefaultErrorMsg, d.Id(), "GetObjectDetailedMeta", AliyunOssGoSdk)
 	}
-
-	log.Printf("[DEBUG] Reading Oss Bucket Object meta: %s", object)
+	addDebug("GetObjectDetailedMeta", object, requestInfo, map[string]interface{}{
+		"objectKey": d.Get("key").(string),
+		"options":   options,
+	})
 
 	d.Set("content_type", object.Get("Content-Type"))
 	d.Set("content_length", object.Get("Content-Length"))
@@ -179,33 +217,35 @@ func resourceAlicloudOssBucketObjectRead(d *schema.ResourceData, meta interface{
 	d.Set("content_disposition", object.Get("Content-Disposition"))
 	d.Set("content_encoding", object.Get("Content-Encoding"))
 	d.Set("expires", object.Get("Expires"))
-	d.Set("server_side_encryption", object.Get("ServerSideEncryption"))
 	d.Set("etag", strings.Trim(object.Get("ETag"), `"`))
+	d.Set("version_id", object.Get("x-oss-version-id"))
 
 	return nil
 }
 
 func resourceAlicloudOssBucketObjectDelete(d *schema.ResourceData, meta interface{}) error {
-	bucket, err := meta.(*AliyunClient).ossconn.Bucket(d.Get("bucket").(string))
+	client := meta.(*connectivity.AliyunClient)
+	ossService := OssService{client}
+	var requestInfo *oss.Client
+	raw, err := client.WithOssClient(func(ossClient *oss.Client) (interface{}, error) {
+		requestInfo = ossClient
+		return ossClient.Bucket(d.Get("bucket").(string))
+	})
 	if err != nil {
-		return fmt.Errorf("Error getting bucket: %#v", err)
+		return WrapErrorf(err, DefaultErrorMsg, d.Id(), "Bucket", AliyunOssGoSdk)
 	}
-	return resource.Retry(5*time.Minute, func() *resource.RetryError {
-		exist, err := bucket.IsObjectExist(d.Id())
-		if err != nil {
-			return resource.NonRetryableError(fmt.Errorf("OSS delete object got an error: %#v", err))
-		}
+	addDebug("Bucket", raw, requestInfo, map[string]string{"bucketName": d.Get("bucket").(string)})
+	bucket, _ := raw.(*oss.Bucket)
 
-		if !exist {
+	err = bucket.DeleteObject(d.Id())
+	if err != nil {
+		if IsExpectedErrors(err, []string{"No Content", "Not Found"}) {
 			return nil
 		}
+		return WrapErrorf(err, DefaultErrorMsg, d.Id(), "DeleteObject", AliyunOssGoSdk)
+	}
 
-		if err := bucket.DeleteObject(d.Id()); err != nil {
-			return resource.RetryableError(fmt.Errorf("OSS object %#v is in use - trying again while it is deleted.", d.Id()))
-		}
-
-		return nil
-	})
+	return WrapError(ossService.WaitForOssBucketObject(bucket, d.Id(), Deleted, DefaultTimeoutMedium))
 
 }
 
@@ -236,12 +276,14 @@ func buildObjectHeaderOptions(d *schema.ResourceData) (options []oss.Option, err
 	}
 
 	if v, ok := d.GetOk("expires"); ok {
-		options = append(options, oss.Expires(v.(time.Time)))
+		expires := v.(string)
+		expiresTime, err := time.Parse(time.RFC1123, expires)
+		if err != nil {
+			return nil, fmt.Errorf("expires format must respect the RFC1123 standard (current value: %s)", expires)
+		}
+		options = append(options, oss.Expires(expiresTime))
 	}
 
-	if v, ok := d.GetOk("server_side_encryption"); ok {
-		options = append(options, oss.ServerSideEncryption(v.(string)))
-	}
 	if options == nil || len(options) == 0 {
 		log.Printf("[WARN] Object header options is nil.")
 	}

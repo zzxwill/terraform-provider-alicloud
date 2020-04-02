@@ -2,7 +2,7 @@ variable "bucket-new" {
   default = "bucket-20180423-1"
 }
 
-variable "bucket-attr"{
+variable "bucket-attr" {
   default = "bucket-20180423-2"
 }
 
@@ -49,3 +49,4 @@ variable "allow-empty" {
 variable "referers" {
   default = "http://www.aliyun.com, https://www.aliyun.com, http://?.aliyun.com"
 }
+

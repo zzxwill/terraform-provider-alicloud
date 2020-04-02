@@ -9,20 +9,6 @@ const (
 	PostgreSQL = Engine("PostgreSQL")
 )
 
-type DBAccountPrivilege string
-
-const (
-	ReadOnly  = DBAccountPrivilege("ReadOnly")
-	ReadWrite = DBAccountPrivilege("ReadWrite")
-)
-
-type DBAccountType string
-
-const (
-	Normal = DBAccountType("Normal")
-	Super  = DBAccountType("Super")
-)
-
 var WEEK_ENUM = []string{"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
 
 var BACKUP_TIME = []string{
@@ -33,7 +19,16 @@ var BACKUP_TIME = []string{
 	"20:00Z-21:00Z", "21:00Z-22:00Z", "22:00Z-23:00Z", "23:00Z-24:00Z",
 }
 
-var CHARACTER_SET_NAME = []string{
-	"utf8", "gbk", "latin1", "utf8mb4",
-	"Chinese_PRC_CI_AS", "Chinese_PRC_CS_AS", "SQL_Latin1_General_CP1_CI_AS", "SQL_Latin1_General_CP1_CS_AS", "Chinese_PRC_BIN",
-}
+type KVStoreInstanceType string
+
+const (
+	KVStoreRedis    = KVStoreInstanceType("Redis")
+	KVStoreMemcache = KVStoreInstanceType("Memcache")
+)
+
+type KVStoreEngineVersion string
+
+const (
+	KVStore2Dot8 = KVStoreEngineVersion("2.8")
+	KVStore4Dot0 = KVStoreEngineVersion("4.0")
+)

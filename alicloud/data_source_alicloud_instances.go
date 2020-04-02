@@ -1,12 +1,13 @@
 package alicloud
 
 import (
-	"fmt"
-	"log"
 	"regexp"
 
-	"github.com/denverdino/aliyungo/ecs"
-	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 func dataSourceAlicloudInstances() *schema.Resource {
@@ -18,13 +19,14 @@ func dataSourceAlicloudInstances() *schema.Resource {
 				Type:     schema.TypeList,
 				Optional: true,
 				Elem:     &schema.Schema{Type: schema.TypeString},
+				Computed: true,
 				ForceNew: true,
 				MinItems: 1,
 			},
 			"name_regex": {
 				Type:         schema.TypeString,
 				Optional:     true,
-				ValidateFunc: validateNameRegex,
+				ValidateFunc: validation.ValidateRegexp,
 				ForceNew:     true,
 			},
 			"image_id": {
@@ -32,11 +34,23 @@ func dataSourceAlicloudInstances() *schema.Resource {
 				Optional: true,
 				ForceNew: true,
 			},
+			"resource_group_id": {
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+			},
 			"status": {
-				Type:         schema.TypeString,
-				Optional:     true,
-				ValidateFunc: validateInstanceStatus,
-				ForceNew:     true,
+				Type:     schema.TypeString,
+				Optional: true,
+				//must contain a valid status, expected Creating, Starting, Running, Stopping, Stopped
+				ValidateFunc: validation.StringInSlice([]string{
+					string(Running),
+					string(Stopped),
+					string(Creating),
+					string(Starting),
+					string(Stopping),
+				}, false),
+				ForceNew: true,
 			},
 			"vpc_id": {
 				Type:     schema.TypeString,
@@ -48,12 +62,16 @@ func dataSourceAlicloudInstances() *schema.Resource {
 				Optional: true,
 				ForceNew: true,
 			},
-			"availability_zone": &schema.Schema{
+			"availability_zone": {
 				Type:     schema.TypeString,
 				Optional: true,
 				ForceNew: true,
 			},
-
+			"ram_role_name": {
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+			},
 			"tags": tagsSchema(),
 
 			"output_file": {
@@ -63,6 +81,11 @@ func dataSourceAlicloudInstances() *schema.Resource {
 			},
 
 			// Computed values
+			"names": {
+				Type:     schema.TypeList,
+				Computed: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
+			},
 			"instances": {
 				Type:     schema.TypeList,
 				Computed: true,
@@ -77,6 +100,10 @@ func dataSourceAlicloudInstances() *schema.Resource {
 							Computed: true,
 						},
 						"availability_zone": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+						"resource_group_id": {
 							Type:     schema.TypeString,
 							Computed: true,
 						},
@@ -145,6 +172,10 @@ func dataSourceAlicloudInstances() *schema.Resource {
 							Type:     schema.TypeInt,
 							Computed: true,
 						},
+						"ram_role_name": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
 						"spot_strategy": {
 							Type:     schema.TypeString,
 							Computed: true,
@@ -182,52 +213,70 @@ func dataSourceAlicloudInstances() *schema.Resource {
 	}
 }
 func dataSourceAlicloudInstancesRead(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ecsconn
+	client := meta.(*connectivity.AliyunClient)
 
-	args := &ecs.DescribeInstancesArgs{
-		RegionId: getRegion(d, meta),
-		Status:   ecs.InstanceStatus(d.Get("status").(string)),
-	}
+	request := ecs.CreateDescribeInstancesRequest()
+	request.RegionId = client.RegionId
+	request.Status = d.Get("status").(string)
 
 	if v, ok := d.GetOk("ids"); ok && len(v.([]interface{})) > 0 {
-		args.InstanceIds = convertListToJsonString(v.([]interface{}))
+		request.InstanceIds = convertListToJsonString(v.([]interface{}))
 	}
-	if v, ok := d.GetOk("vpc_id"); ok && v != "" {
-		args.VpcId = v.(string)
+	if v, ok := d.GetOk("vpc_id"); ok && v.(string) != "" {
+		request.VpcId = v.(string)
 	}
-	if v, ok := d.GetOk("vswitch_id"); ok && v != "" {
-		args.VSwitchId = v.(string)
+	if v, ok := d.GetOk("vswitch_id"); ok && v.(string) != "" {
+		request.VSwitchId = v.(string)
 	}
-	if v, ok := d.GetOk("availability_zone"); ok && v != "" {
-		args.ZoneId = v.(string)
+	if v, ok := d.GetOk("resource_group_id"); ok && v.(string) != "" {
+		request.ResourceGroupId = v.(string)
+	}
+	if v, ok := d.GetOk("availability_zone"); ok && v.(string) != "" {
+		request.ZoneId = v.(string)
 	}
 	if v, ok := d.GetOk("tags"); ok {
-		mapping := make(map[string]string)
+		var tags []ecs.DescribeInstancesTag
+
 		for key, value := range v.(map[string]interface{}) {
-			mapping[key] = value.(string)
+			tags = append(tags, ecs.DescribeInstancesTag{
+				Key:   key,
+				Value: value.(string),
+			})
 		}
-		args.Tag = mapping
+		request.Tag = &tags
 	}
 
-	var allInstances []ecs.InstanceAttributesType
+	var allInstances []ecs.InstanceInDescribeInstances
+	request.PageSize = requests.NewInteger(PageSizeLarge)
+	request.PageNumber = requests.NewInteger(1)
 
 	for {
-		instances, paginationResult, err := conn.DescribeInstances(args)
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.DescribeInstances(request)
+		})
 		if err != nil {
-			return err
+			return WrapErrorf(err, DataDefaultErrorMsg, "alicloud_instances", request.GetActionName(), AlibabaCloudSdkGoERROR)
 		}
-
-		allInstances = append(allInstances, instances...)
-
-		pagination := paginationResult.NextPage()
-		if pagination == nil {
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		response, _ := raw.(*ecs.DescribeInstancesResponse)
+		if len(response.Instances.Instance) < 1 {
 			break
 		}
 
-		args.Pagination = *pagination
+		allInstances = append(allInstances, response.Instances.Instance...)
+
+		if len(response.Instances.Instance) < PageSizeLarge {
+			break
+		}
+
+		if page, err := getNextpageNumber(request.PageNumber); err != nil {
+			return WrapError(err)
+		} else {
+			request.PageNumber = page
+		}
 	}
 
-	var filteredInstancesTemp []ecs.InstanceAttributesType
+	var filteredInstancesTemp []ecs.InstanceInDescribeInstances
 
 	nameRegex, ok := d.GetOk("name_regex")
 	imageId, okImg := d.GetOk("image_id")
@@ -248,21 +297,69 @@ func dataSourceAlicloudInstancesRead(d *schema.ResourceData, meta interface{}) e
 	} else {
 		filteredInstancesTemp = allInstances
 	}
+	// Filter by ram role name and fetch the instance role name
+	instanceIds := make([]string, 0)
+	for _, inst := range filteredInstancesTemp {
+		if inst.InstanceNetworkType == "classic" {
+			continue
+		}
+		instanceIds = append(instanceIds, inst.InstanceId)
+	}
+	instanceRoleNameMap := make(map[string]string)
+	for index := 0; index < len(instanceIds); index += 100 {
+		// DescribeInstanceRamRole parameter InstanceIds supports at most 100 items once
+		request := ecs.CreateDescribeInstanceRamRoleRequest()
+		request.InstanceIds = convertListToJsonString(convertListStringToListInterface(instanceIds[index:IntMin(index+100, len(instanceIds))]))
+		request.RamRoleName = d.Get("ram_role_name").(string)
+		request.PageSize = requests.NewInteger(PageSizeLarge)
+		request.PageNumber = requests.NewInteger(1)
+		for {
+			raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+				return ecsClient.DescribeInstanceRamRole(request)
+			})
+			if err != nil {
+				return WrapErrorf(err, DataDefaultErrorMsg, "alicloud_instances", request.GetActionName(), AlibabaCloudSdkGoERROR)
+			}
+			addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+			response, _ := raw.(*ecs.DescribeInstanceRamRoleResponse)
+			if len(response.InstanceRamRoleSets.InstanceRamRoleSet) < 1 {
+				break
+			}
+			for _, role := range response.InstanceRamRoleSets.InstanceRamRoleSet {
+				instanceRoleNameMap[role.InstanceId] = role.RamRoleName
+			}
 
-	if len(filteredInstancesTemp) < 1 {
-		return fmt.Errorf("Your query returned no results. Please change your search criteria and try again.")
+			if len(response.InstanceRamRoleSets.InstanceRamRoleSet) < PageSizeLarge {
+				break
+			}
+
+			if page, err := getNextpageNumber(request.PageNumber); err != nil {
+				return WrapError(err)
+			} else {
+				request.PageNumber = page
+			}
+		}
+	}
+	instanceDiskMappings, err := getInstanceDisksMappings(instanceRoleNameMap, meta)
+	if err != nil {
+		return WrapError(err)
 	}
 
-	log.Printf("[DEBUG] alicloud_instances - Instances found: %#v", filteredInstancesTemp)
-
-	return instancessDescriptionAttributes(d, filteredInstancesTemp, meta)
+	return instancessDescriptionAttributes(d, filteredInstancesTemp, instanceRoleNameMap, instanceDiskMappings, meta)
 }
 
 // populate the numerous fields that the instance description returns.
-func instancessDescriptionAttributes(d *schema.ResourceData, instances []ecs.InstanceAttributesType, meta interface{}) error {
+func instancessDescriptionAttributes(d *schema.ResourceData, instances []ecs.InstanceInDescribeInstances, instanceRoleNameMap map[string]string, instanceDisksMap map[string][]map[string]interface{}, meta interface{}) error {
+	client := meta.(*connectivity.AliyunClient)
+	ecsService := EcsService{client}
 	var ids []string
+	var names []string
 	var s []map[string]interface{}
 	for _, inst := range instances {
+		// if instance can not in instanceRoleNameMap, it should be removed.
+		if _, ok := instanceRoleNameMap[inst.InstanceId]; !ok {
+			continue
+		}
 		mapping := map[string]interface{}{
 			"id":                         inst.InstanceId,
 			"region_id":                  inst.RegionId,
@@ -275,16 +372,18 @@ func instancessDescriptionAttributes(d *schema.ResourceData, instances []ecs.Ins
 			"image_id":                   inst.ImageId,
 			"description":                inst.Description,
 			"security_groups":            inst.SecurityGroupIds.SecurityGroupId,
+			"resource_group_id":          inst.ResourceGroupId,
 			"eip":                        inst.EipAddress.IpAddress,
 			"key_name":                   inst.KeyPairName,
+			"ram_role_name":              instanceRoleNameMap[inst.InstanceId],
 			"spot_strategy":              inst.SpotStrategy,
-			"creation_time":              inst.CreationTime.String(),
+			"creation_time":              inst.CreationTime,
 			"instance_charge_type":       inst.InstanceChargeType,
 			"internet_charge_type":       inst.InternetChargeType,
 			"internet_max_bandwidth_out": inst.InternetMaxBandwidthOut,
 			// Complex types get their own functions
-			"disk_device_mappings": instanceDisksMappings(d, inst.InstanceId, meta),
-			"tags":                 tagsToMap(inst.Tags.Tag),
+			"disk_device_mappings": instanceDisksMap[inst.InstanceId],
+			"tags":                 ecsService.tagsToMapForInstance(inst.Tags.Tag),
 		}
 		if len(inst.InnerIpAddress.IpAddress) > 0 {
 			mapping["private_ip"] = inst.InnerIpAddress.IpAddress[0]
@@ -297,14 +396,16 @@ func instancessDescriptionAttributes(d *schema.ResourceData, instances []ecs.Ins
 			mapping["public_ip"] = inst.VpcAttributes.NatIpAddress
 		}
 
-		log.Printf("[DEBUG] alicloud_instance - adding instance mapping: %v", mapping)
 		ids = append(ids, inst.InstanceId)
+		names = append(names, inst.InstanceName)
 		s = append(s, mapping)
 	}
 
 	d.SetId(dataResourceIdHash(ids))
+	d.Set("ids", ids)
+	d.Set("names", names)
 	if err := d.Set("instances", s); err != nil {
-		return err
+		return WrapError(err)
 	}
 
 	// create a json file in current directory and write data source to it.
@@ -315,31 +416,51 @@ func instancessDescriptionAttributes(d *schema.ResourceData, instances []ecs.Ins
 }
 
 //Returns a mapping of instance disks
-func instanceDisksMappings(d *schema.ResourceData, instanceId string, meta interface{}) []map[string]interface{} {
+func getInstanceDisksMappings(instanceMap map[string]string, meta interface{}) (map[string][]map[string]interface{}, error) {
+	client := meta.(*connectivity.AliyunClient)
+	request := ecs.CreateDescribeDisksRequest()
+	request.PageSize = requests.NewInteger(PageSizeXLarge)
+	request.PageNumber = requests.NewInteger(1)
+	instanceDisks := make(map[string][]map[string]interface{})
+	var allDisks []ecs.DiskInDescribeDisks
+	for {
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.DescribeDisks(request)
+		})
+		if err != nil {
+			return instanceDisks, WrapErrorf(err, DataDefaultErrorMsg, "alicloud_instances", request.GetActionName(), AlibabaCloudSdkGoERROR)
+		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		response, _ := raw.(*ecs.DescribeDisksResponse)
 
-	disks, _, err := meta.(*AliyunClient).ecsconn.DescribeDisks(&ecs.DescribeDisksArgs{
-		RegionId:   getRegion(d, meta),
-		InstanceId: instanceId,
-	})
-
-	if err != nil {
-		log.Printf("[ERROR] DescribeDisks for instance got error: %#v", err)
-		return nil
-	}
-
-	var s []map[string]interface{}
-
-	for _, v := range disks {
-		mapping := map[string]interface{}{
-			"device":   v.Device,
-			"size":     v.Size,
-			"category": v.Category,
-			"type":     v.Type,
+		if response == nil || len(response.Disks.Disk) < 1 {
+			break
 		}
 
-		log.Printf("[DEBUG] alicloud_instances - adding disk device mapping: %v", mapping)
-		s = append(s, mapping)
+		allDisks = append(allDisks, response.Disks.Disk...)
+
+		if len(response.Disks.Disk) < PageSizeXLarge {
+			break
+		}
+
+		page, err := getNextpageNumber(request.PageNumber)
+		if err != nil {
+			return instanceDisks, WrapError(err)
+		}
+		request.PageNumber = page
+	}
+	for _, disk := range allDisks {
+		if _, ok := instanceMap[disk.InstanceId]; !ok {
+			continue
+		}
+		mapping := map[string]interface{}{
+			"device":   disk.Device,
+			"size":     disk.Size,
+			"category": disk.Category,
+			"type":     disk.Type,
+		}
+		instanceDisks[disk.InstanceId] = append(instanceDisks[disk.InstanceId], mapping)
 	}
 
-	return s
+	return instanceDisks, nil
 }

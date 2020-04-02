@@ -76,13 +76,13 @@ func (client *Client) ModifyRouterInterfaceSpecWithCallback(request *ModifyRoute
 // ModifyRouterInterfaceSpecRequest is the request struct for api ModifyRouterInterfaceSpec
 type ModifyRouterInterfaceSpecRequest struct {
 	*requests.RpcRequest
-	RouterInterfaceId    string           `position:"Query" name:"RouterInterfaceId"`
-	Spec                 string           `position:"Query" name:"Spec"`
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
 	ClientToken          string           `position:"Query" name:"ClientToken"`
+	Spec                 string           `position:"Query" name:"Spec"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	RouterInterfaceId    string           `position:"Query" name:"RouterInterfaceId"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
 }
 
 // ModifyRouterInterfaceSpecResponse is the response struct for api ModifyRouterInterfaceSpec
@@ -97,7 +97,7 @@ func CreateModifyRouterInterfaceSpecRequest() (request *ModifyRouterInterfaceSpe
 	request = &ModifyRouterInterfaceSpecRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "ModifyRouterInterfaceSpec", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "ModifyRouterInterfaceSpec", "Vpc", "openAPI")
 	return
 }
 

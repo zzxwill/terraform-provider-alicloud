@@ -3,15 +3,93 @@ package alicloud
 import (
 	"fmt"
 	"log"
+	"strings"
 	"testing"
 
-	"github.com/denverdino/aliyungo/dns"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform/helper/acctest"
+
+	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/alidns"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
+func init() {
+	resource.AddTestSweepers(
+		"alicloud_dns_group",
+		&resource.Sweeper{
+			Name: "alicloud_dns_group",
+			F:    testSweepDnsGroup,
+		})
+}
+
+func testSweepDnsGroup(region string) error {
+	rawClient, err := sharedClientForRegion(region)
+	if err != nil {
+		return WrapError(err)
+	}
+	client := rawClient.(*connectivity.AliyunClient)
+
+	request := alidns.CreateDescribeDomainGroupsRequest()
+
+	var allGroups []alidns.DomainGroup
+	request.PageSize = requests.NewInteger(PageSizeLarge)
+	request.PageNumber = requests.NewInteger(1)
+	for {
+		raw, err := client.WithDnsClient(func(dnsClient *alidns.Client) (interface{}, error) {
+			return dnsClient.DescribeDomainGroups(request)
+		})
+		if err != nil {
+			log.Printf("[ERROR] %s get an error: %#v", request.GetActionName(), err)
+		}
+		addDebug(request.GetActionName(), raw)
+		response, _ := raw.(*alidns.DescribeDomainGroupsResponse)
+		groups := response.DomainGroups.DomainGroup
+		for _, domainGroup := range groups {
+			if strings.HasPrefix(domainGroup.GroupName, "tf-testacc") {
+				allGroups = append(allGroups, domainGroup)
+			} else {
+				log.Printf("Skip %#v.", domainGroup)
+			}
+		}
+		if len(groups) < PageSizeLarge {
+			break
+		}
+		if page, err := getNextpageNumber(request.PageNumber); err != nil {
+			return WrapError(err)
+		} else {
+			request.PageNumber = page
+		}
+	}
+
+	removeRequest := alidns.CreateDeleteDomainGroupRequest()
+
+	for _, group := range allGroups {
+		removeRequest.GroupId = group.GroupId
+		raw, err := client.WithDnsClient(func(dnsClient *alidns.Client) (interface{}, error) {
+			return dnsClient.DeleteDomainGroup(removeRequest)
+		})
+		if err != nil {
+			log.Printf("[ERROR] %s get an error: %#v", request.GetActionName(), err)
+		}
+		addDebug(request.GetActionName(), raw)
+	}
+	return nil
+}
+
 func TestAccAlicloudDnsGroup_basic(t *testing.T) {
-	var v dns.DomainGroupType
+	resourceId := "alicloud_dns_group.default"
+	var v alidns.DomainGroup
+	serviceFunc := func() interface{} {
+		return &DnsService{testAccProvider.Meta().(*connectivity.AliyunClient)}
+	}
+	rc := resourceCheckInit(resourceId, &v, serviceFunc)
+	ra := resourceAttrInit(resourceId, nil)
+	rac := resourceAttrCheckInit(rc, ra)
+	rand := acctest.RandIntRange(10000, 99999)
+	testAccCheck := rac.resourceAttrMapUpdateSet()
+	name := fmt.Sprintf("tf-testaccdns%d", rand)
+	testAccConfig := resourceTestAccConfigFunc(resourceId, name, resourceDnsGroupConfigDependence)
 
 	resource.Test(t, resource.TestCase{
 		PreCheck: func() {
@@ -19,89 +97,40 @@ func TestAccAlicloudDnsGroup_basic(t *testing.T) {
 		},
 
 		// module name
-		IDRefreshName: "alicloud_dns_group.group",
+		IDRefreshName: resourceId,
 
 		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckDnsGroupDestroy,
+		CheckDestroy: rac.checkResourceDestroy(),
 		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccDnsGroupConfig,
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"name": "${var.name}",
+				}),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckDnsGroupExists(
-						"alicloud_dns_group.group", &v),
-					resource.TestCheckResourceAttr(
-						"alicloud_dns_group.group",
-						"name",
-						"yutest"),
+					testAccCheck(map[string]string{
+						"name": name,
+					}),
+				),
+			},
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"name": fmt.Sprintf("tf-testaccdns%d", rand-1),
+				}),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheck(map[string]string{
+						"name": fmt.Sprintf("tf-testaccdns%d", rand-1),
+					}),
 				),
 			},
 		},
 	})
-
 }
 
-func testAccCheckDnsGroupExists(n string, group *dns.DomainGroupType) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[n]
-		if !ok {
-			return fmt.Errorf("Not found: %s", n)
-		}
-
-		if rs.Primary.ID == "" {
-			return fmt.Errorf("No Domain group ID is set")
-		}
-
-		client := testAccProvider.Meta().(*AliyunClient)
-		conn := client.dnsconn
-
-		request := &dns.DescribeDomainGroupsArgs{
-			KeyWord: rs.Primary.Attributes["name"],
-		}
-
-		response, err := conn.DescribeDomainGroups(request)
-		log.Printf("[WARN] Group id %#v", rs.Primary.ID)
-
-		if err == nil {
-			if response != nil && len(response) > 0 {
-				*group = response[0]
-				return nil
-			}
-		}
-		return fmt.Errorf("Error finding domain group %#v", rs.Primary.ID)
-	}
+func resourceDnsGroupConfigDependence(name string) string {
+	return fmt.Sprintf(`
+variable "name" {
+	default = "%s"
 }
 
-func testAccCheckDnsGroupDestroy(s *terraform.State) error {
-
-	for _, rs := range s.RootModule().Resources {
-		if rs.Type != "alicloud_dns_group" {
-			continue
-		}
-
-		// Try to find the domain group
-		client := testAccProvider.Meta().(*AliyunClient)
-		conn := client.dnsconn
-
-		request := &dns.DescribeDomainGroupsArgs{
-			KeyWord: rs.Primary.Attributes["name"],
-		}
-
-		response, err := conn.DescribeDomainGroups(request)
-
-		if response != nil && len(response) > 0 {
-			return fmt.Errorf("Error groups still exist")
-		}
-
-		if err != nil {
-			// Verify the error is what we want
-			return err
-		}
-	}
-	return nil
+`, name)
 }
-
-const testAccDnsGroupConfig = `
-resource "alicloud_dns_group" "group" {
-  name = "yutest"
-}
-`

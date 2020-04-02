@@ -1,631 +1,1479 @@
 package alicloud
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 
-	"github.com/denverdino/aliyungo/common"
-	"github.com/denverdino/aliyungo/ecs"
-	"github.com/hashicorp/terraform/helper/schema"
+	"time"
+
+	"strconv"
+
+	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
-func (client *AliyunClient) DescribeImage(imageId string) (*ecs.ImageType, error) {
+type EcsService struct {
+	client *connectivity.AliyunClient
+}
 
-	pagination := common.Pagination{
-		PageNumber: 1,
+func (s *EcsService) JudgeRegionValidation(key, region string) error {
+	request := ecs.CreateDescribeRegionsRequest()
+	request.RegionId = s.client.RegionId
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeRegions(request)
+	})
+	if err != nil {
+		return fmt.Errorf("DescribeRegions got an error: %#v", err)
 	}
-	args := ecs.DescribeImagesArgs{
-		Pagination: pagination,
-		RegionId:   client.Region,
-		Status:     ecs.ImageStatusAvailable,
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	resp, _ := raw.(*ecs.DescribeRegionsResponse)
+	if resp == nil || len(resp.Regions.Region) < 1 {
+		return GetNotFoundErrorFromString("There is no any available region.")
 	}
 
-	var allImages []ecs.ImageType
-
-	for {
-		images, _, err := client.ecsconn.DescribeImages(&args)
-		if err != nil {
-			break
+	var rs []string
+	for _, v := range resp.Regions.Region {
+		if v.RegionId == region {
+			return nil
 		}
-
-		if len(images) == 0 {
-			break
-		}
-
-		allImages = append(allImages, images...)
-
-		args.Pagination.PageNumber++
+		rs = append(rs, v.RegionId)
 	}
-
-	if len(allImages) == 0 {
-		return nil, common.GetClientErrorFromString("Not found")
-	}
-
-	var image *ecs.ImageType
-	imageIds := []string{}
-	for _, im := range allImages {
-		if im.ImageId == imageId {
-			image = &im
-		}
-		imageIds = append(imageIds, im.ImageId)
-	}
-
-	if image == nil {
-		return nil, fmt.Errorf("image_id %s not exists in range %s, all images are %s", imageId, client.Region, imageIds)
-	}
-
-	return image, nil
+	return fmt.Errorf("'%s' is invalid. Expected on %v.", key, strings.Join(rs, ", "))
 }
 
 // DescribeZone validate zoneId is valid in region
-func (client *AliyunClient) DescribeZone(zoneID string) (*ecs.ZoneType, error) {
-	zones, err := client.ecsconn.DescribeZones(client.Region)
+func (s *EcsService) DescribeZone(id string) (zone ecs.ZoneInDescribeZones, err error) {
+	request := ecs.CreateDescribeZonesRequest()
+	request.RegionId = s.client.RegionId
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeZones(request)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("error to list zones not found")
+		err = WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ecs.DescribeZonesResponse)
+	if len(response.Zones.Zone) < 1 {
+		return zone, WrapError(Error("There is no any availability zone in region %s.", s.client.RegionId))
 	}
 
-	var zone *ecs.ZoneType
 	zoneIds := []string{}
-	for _, z := range zones {
-		if z.ZoneId == zoneID {
-			zone = &ecs.ZoneType{
-				ZoneId:                    z.ZoneId,
-				LocalName:                 z.LocalName,
-				AvailableResourceCreation: z.AvailableResourceCreation,
-				AvailableDiskCategories:   z.AvailableDiskCategories,
-			}
+	for _, z := range response.Zones.Zone {
+		if z.ZoneId == id {
+			return z, nil
 		}
 		zoneIds = append(zoneIds, z.ZoneId)
 	}
-
-	if zone == nil {
-		return nil, fmt.Errorf("availability_zone not exists in range %s, all zones are %s", client.Region, zoneIds)
-	}
-
-	return zone, nil
+	return zone, WrapError(Error("availability_zone %s not exists in region %s, all zones are %s", id, s.client.RegionId, zoneIds))
 }
 
-func (client *AliyunClient) QueryInstancesByIds(ids []string) (instances []ecs.InstanceAttributesType, err error) {
-	idsStr, jerr := json.Marshal(ids)
-	if jerr != nil {
-		return nil, jerr
-	}
-
-	args := ecs.DescribeInstancesArgs{
-		RegionId:    client.Region,
-		InstanceIds: string(idsStr),
-	}
-
-	instances, _, errs := client.ecsconn.DescribeInstances(&args)
-
-	if errs != nil {
-		return nil, errs
-	}
-
-	return instances, nil
-}
-
-func (client *AliyunClient) QueryInstancesById(id string) (instance *ecs.InstanceAttributesType, err error) {
-	ids := []string{id}
-
-	instances, errs := client.QueryInstancesByIds(ids)
-	if errs != nil {
-		return nil, errs
-	}
-
-	if len(instances) == 0 {
-		return nil, GetNotFoundErrorFromString(InstanceNotFound)
-	}
-
-	return &instances[0], nil
-}
-
-func (client *AliyunClient) QueryInstanceSystemDisk(id string) (disk *ecs.DiskItemType, err error) {
-	args := ecs.DescribeDisksArgs{
-		RegionId:   client.Region,
-		InstanceId: string(id),
-		DiskType:   ecs.DiskTypeAllSystem,
-	}
-	disks, _, err := client.ecsconn.DescribeDisks(&args)
+func (s *EcsService) DescribeZones(d *schema.ResourceData) (zones []ecs.ZoneInDescribeZones, err error) {
+	request := ecs.CreateDescribeZonesRequest()
+	request.RegionId = s.client.RegionId
+	request.InstanceChargeType = d.Get("instance_charge_type").(string)
+	request.SpotStrategy = d.Get("spot_strategy").(string)
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeZones(request)
+	})
 	if err != nil {
-		return nil, err
+		err = WrapErrorf(err, DefaultErrorMsg, "alicloud_instance_type_families", request.GetActionName(), AlibabaCloudSdkGoERROR)
+		return
 	}
-	if len(disks) == 0 {
-		return nil, GetNotFoundErrorFromString(SystemDiskNotFound)
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ecs.DescribeZonesResponse)
+	if len(response.Zones.Zone) < 1 {
+		return zones, WrapError(Error("There is no any availability zone in region %s.", s.client.RegionId))
 	}
-
-	return &disks[0], nil
-}
-
-// ResourceAvailable check resource available for zone
-func (client *AliyunClient) ResourceAvailable(zone *ecs.ZoneType, resourceType ecs.ResourceType) error {
-	available := false
-	for _, res := range zone.AvailableResourceCreation.ResourceTypes {
-		if res == resourceType {
-			available = true
-		}
-	}
-	if !available {
-		return fmt.Errorf("%s is not available in %s zone of %s region", resourceType, zone.ZoneId, client.Region)
-	}
-
-	return nil
-}
-
-func (client *AliyunClient) DiskAvailable(zone *ecs.ZoneType, diskCategory ecs.DiskCategory) error {
-	available := false
-	for _, dist := range zone.AvailableDiskCategories.DiskCategories {
-		if dist == diskCategory {
-			available = true
-		}
-	}
-	if !available {
-		return fmt.Errorf("%s is not available in %s zone of %s region", diskCategory, zone.ZoneId, client.Region)
-	}
-	return nil
-}
-
-// todo: support syc
-func (client *AliyunClient) JoinSecurityGroups(instanceId string, securityGroupIds []string) error {
-	for _, sid := range securityGroupIds {
-		err := client.ecsconn.JoinSecurityGroup(instanceId, sid)
-		if err != nil {
-			e, _ := err.(*common.Error)
-			if e.ErrorResponse.Code != InvalidInstanceIdAlreadyExists {
-				return err
+	if v, ok := d.GetOk("zone_id"); ok {
+		zoneIds := []string{}
+		for _, z := range response.Zones.Zone {
+			if z.ZoneId == v.(string) {
+				return []ecs.ZoneInDescribeZones{z}, nil
 			}
+			zoneIds = append(zoneIds, z.ZoneId)
 		}
+		return zones, WrapError(Error("availability_zone %s not exists in region %s, all zones are %s", v.(string), s.client.RegionId, zoneIds))
+	} else {
+		return response.Zones.Zone, nil
 	}
-
-	return nil
 }
 
-func (client *AliyunClient) LeaveSecurityGroups(instanceId string, securityGroupIds []string) error {
-	for _, sid := range securityGroupIds {
-		err := client.ecsconn.LeaveSecurityGroup(instanceId, sid)
+func (s *EcsService) DescribeInstance(id string) (instance ecs.InstanceInDescribeInstances, err error) {
+	request := ecs.CreateDescribeInstancesRequest()
+	request.RegionId = s.client.RegionId
+	request.InstanceIds = convertListToJsonString([]interface{}{id})
+
+	var response *ecs.DescribeInstancesResponse
+	wait := incrementalWait(1*time.Second, 1*time.Second)
+	err = resource.Retry(10*time.Minute, func() *resource.RetryError {
+		raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.DescribeInstances(request)
+		})
 		if err != nil {
-			e, _ := err.(*common.Error)
-			if e.ErrorResponse.Code != InvalidSecurityGroupIdNotFound {
-				return err
+			if IsThrottling(err) {
+				wait()
+				return resource.RetryableError(err)
+
 			}
+			return resource.NonRetryableError(err)
 		}
-	}
-
-	return nil
-}
-
-func (client *AliyunClient) DescribeSecurity(securityGroupId string) (*ecs.DescribeSecurityGroupAttributeResponse, error) {
-
-	args := &ecs.DescribeSecurityGroupAttributeArgs{
-		RegionId:        client.Region,
-		SecurityGroupId: securityGroupId,
-	}
-
-	return client.ecsconn.DescribeSecurityGroupAttribute(args)
-}
-
-func (client *AliyunClient) DescribeSecurityGroupRule(groupId, direction, ipProtocol, portRange, nicType, cidr_ip, policy string, priority int) (*ecs.PermissionType, error) {
-	rules, err := client.ecsconn.DescribeSecurityGroupAttribute(&ecs.DescribeSecurityGroupAttributeArgs{
-		RegionId:        client.Region,
-		SecurityGroupId: groupId,
-		Direction:       ecs.Direction(direction),
-		NicType:         ecs.NicType(nicType),
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		response, _ = raw.(*ecs.DescribeInstancesResponse)
+		return nil
 	})
 
 	if err != nil {
-		return nil, err
+		err = WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+		return
+	}
+	if len(response.Instances.Instance) < 1 {
+		return instance, WrapErrorf(Error(GetNotFoundMessage("Instance", id)), NotFoundMsg, ProviderERROR)
 	}
 
-	for _, ru := range rules.Permissions.Permission {
+	return response.Instances.Instance[0], nil
+}
+
+func (s *EcsService) DescribeInstanceAttribute(id string) (instance ecs.DescribeInstanceAttributeResponse, err error) {
+	request := ecs.CreateDescribeInstanceAttributeRequest()
+	request.InstanceId = id
+	request.RegionId = s.client.RegionId
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeInstanceAttribute(request)
+	})
+	if err != nil {
+		return instance, WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ecs.DescribeInstanceAttributeResponse)
+	if response.InstanceId != id {
+		return instance, WrapErrorf(Error(GetNotFoundMessage("Instance", id)), NotFoundMsg, ProviderERROR)
+	}
+
+	return *response, nil
+}
+
+func (s *EcsService) DescribeInstanceSystemDisk(id, rg string) (disk ecs.DiskInDescribeDisks, err error) {
+	request := ecs.CreateDescribeDisksRequest()
+	request.InstanceId = id
+	request.DiskType = string(DiskTypeSystem)
+	request.RegionId = s.client.RegionId
+	request.ResourceGroupId = rg
+	var response *ecs.DescribeDisksResponse
+	wait := incrementalWait(1*time.Second, 1*time.Second)
+	err = resource.Retry(10*time.Minute, func() *resource.RetryError {
+		raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.DescribeDisks(request)
+		})
+		if err != nil {
+			if IsThrottling(err) {
+				wait()
+				return resource.RetryableError(err)
+
+			}
+			return resource.NonRetryableError(err)
+		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		response, _ = raw.(*ecs.DescribeDisksResponse)
+		return nil
+	})
+	if err != nil {
+		return disk, WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	if len(response.Disks.Disk) < 1 || response.Disks.Disk[0].InstanceId != id {
+		return disk, WrapErrorf(Error(GetNotFoundMessage("Instance", id)), NotFoundMsg, ProviderERROR)
+	}
+	return response.Disks.Disk[0], nil
+}
+
+// ResourceAvailable check resource available for zone
+func (s *EcsService) ResourceAvailable(zone ecs.ZoneInDescribeZones, resourceType ResourceType) error {
+	for _, res := range zone.AvailableResourceCreation.ResourceTypes {
+		if res == string(resourceType) {
+			return nil
+		}
+	}
+	return WrapError(Error("%s is not available in %s zone of %s region", resourceType, zone.ZoneId, s.client.Region))
+}
+
+func (s *EcsService) DiskAvailable(zone ecs.ZoneInDescribeZones, diskCategory DiskCategory) error {
+	for _, disk := range zone.AvailableDiskCategories.DiskCategories {
+		if disk == string(diskCategory) {
+			return nil
+		}
+	}
+	return WrapError(Error("%s is not available in %s zone of %s region", diskCategory, zone.ZoneId, s.client.Region))
+}
+
+func (s *EcsService) JoinSecurityGroups(instanceId string, securityGroupIds []string) error {
+	request := ecs.CreateJoinSecurityGroupRequest()
+	request.InstanceId = instanceId
+	request.RegionId = s.client.RegionId
+	for _, sid := range securityGroupIds {
+		request.SecurityGroupId = sid
+		raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.JoinSecurityGroup(request)
+		})
+		if err != nil && IsExpectedErrors(err, []string{"InvalidInstanceId.AlreadyExists"}) {
+			return WrapErrorf(err, DefaultErrorMsg, instanceId, request.GetActionName(), AlibabaCloudSdkGoERROR)
+		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	}
+
+	return nil
+}
+
+func (s *EcsService) LeaveSecurityGroups(instanceId string, securityGroupIds []string) error {
+	request := ecs.CreateLeaveSecurityGroupRequest()
+	request.InstanceId = instanceId
+	request.RegionId = s.client.RegionId
+	for _, sid := range securityGroupIds {
+		request.SecurityGroupId = sid
+		raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.LeaveSecurityGroup(request)
+		})
+		if err != nil && IsExpectedErrors(err, []string{"InvalidSecurityGroupId.NotFound"}) {
+			return WrapErrorf(err, DefaultErrorMsg, instanceId, request.GetActionName(), AlibabaCloudSdkGoERROR)
+		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	}
+
+	return nil
+}
+
+func (s *EcsService) DescribeSecurityGroup(id string) (group ecs.DescribeSecurityGroupAttributeResponse, err error) {
+	request := ecs.CreateDescribeSecurityGroupAttributeRequest()
+	request.SecurityGroupId = id
+	request.RegionId = s.client.RegionId
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeSecurityGroupAttribute(request)
+	})
+	if err != nil {
+		if IsExpectedErrors(err, []string{"InvalidSecurityGroupId.NotFound"}) {
+			err = WrapErrorf(err, NotFoundMsg, AlibabaCloudSdkGoERROR)
+		}
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ecs.DescribeSecurityGroupAttributeResponse)
+	if response.SecurityGroupId != id {
+		err = WrapErrorf(Error(GetNotFoundMessage("Security Group", id)), NotFoundMsg, ProviderERROR)
+		return
+	}
+
+	return *response, nil
+}
+
+func (s *EcsService) DescribeSecurityGroupRule(id string) (rule ecs.Permission, err error) {
+	parts, err := ParseResourceId(id, 8)
+	if err != nil {
+		return rule, WrapError(err)
+	}
+	groupId, direction, ipProtocol, portRange, nicType, cidr_ip, policy := parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+	priority, err := strconv.Atoi(parts[7])
+	if err != nil {
+		return rule, WrapError(err)
+	}
+	request := ecs.CreateDescribeSecurityGroupAttributeRequest()
+	request.SecurityGroupId = groupId
+	request.Direction = direction
+	request.NicType = nicType
+	request.RegionId = s.client.RegionId
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeSecurityGroupAttribute(request)
+	})
+	if err != nil {
+		if IsExpectedErrors(err, []string{"InvalidSecurityGroupId.NotFound"}) {
+			err = WrapErrorf(err, NotFoundMsg, AlibabaCloudSdkGoERROR)
+		}
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ecs.DescribeSecurityGroupAttributeResponse)
+	if response == nil {
+		return rule, GetNotFoundErrorFromString(GetNotFoundMessage("Security Group", groupId))
+	}
+
+	for _, ru := range response.Permissions.Permission {
 		if strings.ToLower(string(ru.IpProtocol)) == ipProtocol && ru.PortRange == portRange {
 			cidr := ru.SourceCidrIp
-			if ecs.Direction(direction) == ecs.DirectionIngress && cidr == "" {
+			if direction == string(DirectionIngress) && cidr == "" {
 				cidr = ru.SourceGroupId
 			}
-			if ecs.Direction(direction) == ecs.DirectionEgress {
+			if direction == string(DirectionEgress) {
 				if cidr = ru.DestCidrIp; cidr == "" {
 					cidr = ru.DestGroupId
 				}
 			}
 
-			if cidr == cidr_ip && strings.ToLower(string(ru.Policy)) == policy && ru.Priority == priority {
-				return &ru, nil
+			if cidr == cidr_ip && strings.ToLower(string(ru.Policy)) == policy && ru.Priority == strconv.Itoa(priority) {
+				return ru, nil
 			}
 		}
 	}
 
-	return nil, GetNotFoundErrorFromString("Security group rule not found")
+	return rule, WrapErrorf(Error(GetNotFoundMessage("Security Group Rule", id)), NotFoundMsg, ProviderERROR)
 
 }
 
-func (client *AliyunClient) RevokeSecurityGroup(args *ecs.RevokeSecurityGroupArgs) error {
-	//when the rule is not exist, api will return success(200)
-	return client.ecsconn.RevokeSecurityGroup(args)
-}
-
-func (client *AliyunClient) RevokeSecurityGroupEgress(args *ecs.RevokeSecurityGroupEgressArgs) error {
-	//when the rule is not exist, api will return success(200)
-	return client.ecsconn.RevokeSecurityGroupEgress(args)
-}
-
-func (client *AliyunClient) CheckParameterValidity(d *schema.ResourceData, meta interface{}) (map[ResourceKeyType]interface{}, error) {
+func (s *EcsService) DescribeAvailableResources(d *schema.ResourceData, meta interface{}, destination DestinationResource) (zoneId string, validZones []ecs.AvailableZoneInDescribeAvailableResource, err error) {
+	client := meta.(*connectivity.AliyunClient)
 	// Before creating resources, check input parameters validity according available zone.
 	// If availability zone is nil, it will return all of supported resources in the current.
-	conn := meta.(*AliyunClient).ecsconn
-	zones, err := conn.DescribeZones(getRegion(d, meta))
+	request := ecs.CreateDescribeAvailableResourceRequest()
+	request.RegionId = s.client.RegionId
+	request.DestinationResource = string(destination)
+	request.IoOptimized = string(IOOptimized)
+
+	if v, ok := d.GetOk("availability_zone"); ok && strings.TrimSpace(v.(string)) != "" {
+		zoneId = strings.TrimSpace(v.(string))
+	} else if v, ok := d.GetOk("vswitch_id"); ok && strings.TrimSpace(v.(string)) != "" {
+		vpcService := VpcService{s.client}
+		if vsw, err := vpcService.DescribeVSwitch(strings.TrimSpace(v.(string))); err == nil {
+			zoneId = vsw.ZoneId
+		}
+	}
+
+	if v, ok := d.GetOk("instance_charge_type"); ok && strings.TrimSpace(v.(string)) != "" {
+		request.InstanceChargeType = strings.TrimSpace(v.(string))
+	}
+
+	if v, ok := d.GetOk("spot_strategy"); ok && strings.TrimSpace(v.(string)) != "" {
+		request.SpotStrategy = strings.TrimSpace(v.(string))
+	}
+
+	if v, ok := d.GetOk("network_type"); ok && strings.TrimSpace(v.(string)) != "" {
+		request.NetworkCategory = strings.TrimSpace(v.(string))
+	}
+
+	if v, ok := d.GetOk("is_outdated"); ok && v.(bool) == true {
+		request.IoOptimized = string(NoneOptimized)
+	}
+
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeAvailableResource(request)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("Error DescribeZone: %#v", err)
+		return "", nil, WrapErrorf(err, DefaultErrorMsg, d.Id(), request.GetActionName(), AlibabaCloudSdkGoERROR)
 	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ecs.DescribeAvailableResourceResponse)
 
-	if zones == nil || len(zones) < 1 {
-		return nil, fmt.Errorf("There are no availability zones in the region: %#v.", getRegion(d, meta))
-	}
-
-	zoneId := ""
-	if val, ok := d.GetOk("availability_zone"); ok {
-		zoneId = val.(string)
+	if len(response.AvailableZones.AvailableZone) < 1 {
+		err = WrapError(Error("There are no availability resources in the region: %s.", client.RegionId))
+		return
 	}
 
 	valid := false
-	var validZones []string
-	for _, zone := range zones {
+	soldout := false
+	var expectedZones []string
+	for _, zone := range response.AvailableZones.AvailableZone {
+		if zone.Status == string(SoldOut) {
+			if zone.ZoneId == zoneId {
+				soldout = true
+			}
+			continue
+		}
 		if zoneId != "" && zone.ZoneId == zoneId {
 			valid = true
-			zones = append(make([]ecs.ZoneType, 1), zone)
+			validZones = append(make([]ecs.AvailableZoneInDescribeAvailableResource, 1), zone)
 			break
 		}
-		validZones = append(validZones, zone.ZoneId)
+		expectedZones = append(expectedZones, zone.ZoneId)
+		validZones = append(validZones, zone)
 	}
-	if zoneId != "" && !valid {
-		return nil, fmt.Errorf("Availability zone %s is not supported in the region %s. Expected availability zones: %s.",
-			zoneId, getRegion(d, meta), strings.Join(validZones, ", "))
-	}
-
-	// Retrieve series instance type family
-	ioOptimized := ecs.IoOptimizedOptimized
-	var expectedFamilies []string
-	mapOutdatedInstanceFamilies, mapUpgradedInstanceFamilies, err := client.FetchSpecifiedInstanceTypeFamily(getRegion(d, meta), zoneId, []string{GenerationOne, GenerationTwo}, zones)
-	if err != nil {
-		return nil, err
-	}
-	for key := range mapUpgradedInstanceFamilies {
-		expectedFamilies = append(expectedFamilies, key)
-	}
-
-	validData := make(map[ResourceKeyType]interface{})
-	mapZones := make(map[string]ecs.ZoneType)
-	mapSupportedInstanceTypes := make(map[string]string)
-	mapUpgradedInstanceTypes := make(map[string]string)
-	mapOutdatedInstanceTypes := make(map[string]string)
-	mapOutdatedDiskCategories := make(map[ecs.DiskCategory]ecs.DiskCategory)
-	mapDiskCategories := make(map[ecs.DiskCategory]ecs.DiskCategory)
-	for _, zone := range zones {
-		//Filter and get all instance types in the zones
-		for _, insType := range zone.AvailableInstanceTypes.InstanceTypes {
-			if _, ok := mapSupportedInstanceTypes[insType]; !ok {
-				insTypeSplit := strings.Split(insType, DOT_SEPARATED)
-				mapSupportedInstanceTypes[insType] = string(insTypeSplit[0] + DOT_SEPARATED + insTypeSplit[1])
-			}
+	if zoneId != "" {
+		if !valid {
+			err = WrapError(Error("Availability zone %s status is not available in the region %s. Expected availability zones: %s.",
+				zoneId, client.RegionId, strings.Join(expectedZones, ", ")))
+			return
 		}
-		if len(zone.AvailableDiskCategories.DiskCategories) < 1 {
-			continue
-		}
-		//Filter and get all instance types in the zones
-		for _, category := range zone.AvailableDiskCategories.DiskCategories {
-			if _, ok := SupportedDiskCategory[category]; ok {
-				mapDiskCategories[category] = category
-			}
-			if _, ok := OutdatedDiskCategory[category]; ok {
-				mapOutdatedDiskCategories[category] = category
-			}
-		}
-		resources := zone.AvailableResources.ResourcesInfo
-		if len(resources) < 1 {
-			continue
-		}
-		mapZones[zone.ZoneId] = zone
-	}
-	//separate all instance types according generation 3 in the zones
-	for key, _ := range mapSupportedInstanceTypes {
-		find := false
-		for out, _ := range mapOutdatedInstanceFamilies {
-			if strings.HasPrefix(key, out) {
-				mapOutdatedInstanceTypes[key] = out
-				mapSupportedInstanceTypes[key] = out
-				find = true
-				break
-			}
-		}
-		if find {
-			continue
-		}
-		for upgrade, _ := range mapUpgradedInstanceFamilies {
-			if strings.HasPrefix(key, upgrade) {
-				mapUpgradedInstanceTypes[key] = upgrade
-				mapSupportedInstanceTypes[key] = upgrade
-				break
-			}
+		if soldout {
+			err = WrapError(Error("Availability zone %s status is sold out in the region %s. Expected availability zones: %s.",
+				zoneId, client.RegionId, strings.Join(expectedZones, ", ")))
+			return
 		}
 	}
 
-	instanceTypeSchemas := []string{"available_instance_type", "instance_type", "master_instance_type", "worker_instance_type"}
-	var instanceTypes []string
-	for _, iType := range instanceTypeSchemas {
-		if insType, ok := d.GetOk(iType); ok {
-			instanceTypes = append(instanceTypes, insType.(string))
-		}
+	if len(validZones) <= 0 {
+		err = WrapError(Error("There is no availability resources in the region %s. Please choose another region.", client.RegionId))
+		return
 	}
 
-	if len(instanceTypes) > 0 {
-		for _, instanceType := range instanceTypes {
-			if !strings.HasPrefix(instanceType, "ecs.") {
-				return nil, fmt.Errorf("Invalid instance_type: %s. Please modify it and try again.", instanceType)
-			}
-			var instanceTypeObject ecs.InstanceTypeItemType
-			targetFamily, ok := mapSupportedInstanceTypes[instanceType]
-			if ok {
-				mapInstanceTypes, err := client.FetchSpecifiedInstanceTypesByFamily(zoneId, targetFamily, zones)
-				if err != nil {
-					return nil, err
-				}
-
-				var validInstanceTypes []string
-				for key, value := range mapInstanceTypes {
-					if instanceType == key {
-						instanceTypeObject = mapInstanceTypes[key]
-						break
-					}
-					core := "Core"
-					if value.CpuCoreCount > 1 {
-						core = "Cores"
-					}
-					validInstanceTypes = append(validInstanceTypes, fmt.Sprintf("%s(%d%s,%.0fGB)", key, value.CpuCoreCount, core, value.MemorySize))
-				}
-				if instanceTypeObject.InstanceTypeId == "" {
-					if zoneId == "" {
-						return nil, fmt.Errorf("Instance type %s is not supported in the region %s. Expected instance types of family %s: %s.",
-							instanceType, getRegion(d, meta), targetFamily, strings.Join(validInstanceTypes, ", "))
-					}
-					return nil, fmt.Errorf("Instance type %s is not supported in the availability zone %s. Expected instance types of family %s: %s.",
-						instanceType, zoneId, targetFamily, strings.Join(validInstanceTypes, ", "))
-				}
-
-				outDisk := false
-				if disk, ok := d.GetOk("system_disk_category"); ok {
-					_, outDisk = OutdatedDiskCategory[ecs.DiskCategory(disk.(string))]
-				}
-
-				_, outdatedOk := mapOutdatedInstanceTypes[instanceType]
-				_, expectedOk := mapUpgradedInstanceTypes[instanceType]
-
-				if expectedOk && outDisk {
-					return nil, fmt.Errorf("Instance type %s can't support 'cloud' as instance system disk. "+
-						"Please change your disk category to efficient disk '%s' or '%s'.", instanceType, ecs.DiskCategoryCloudSSD, ecs.DiskCategoryCloudEfficiency)
-				}
-				if outdatedOk {
-					var expectedEqualCpus []string
-					var expectedEqualMoreCpus []string
-					for _, fam := range mapUpgradedInstanceTypes {
-						mapInstanceTypes, err := client.FetchSpecifiedInstanceTypesByFamily(zoneId, fam, zones)
-						if err != nil {
-							return nil, err
-						}
-						for _, value := range mapInstanceTypes {
-							core := "Core"
-							if value.CpuCoreCount > 1 {
-								core = "Cores"
-							}
-							if instanceTypeObject.CpuCoreCount == value.CpuCoreCount {
-								expectedEqualCpus = append(expectedEqualCpus, fmt.Sprintf("%s(%d%s,%.0fGB)", value.InstanceTypeId, value.CpuCoreCount, core, value.MemorySize))
-							} else if instanceTypeObject.CpuCoreCount*2 == value.CpuCoreCount {
-								expectedEqualMoreCpus = append(expectedEqualMoreCpus, fmt.Sprintf("%s(%d%s,%.0fGB)", value.InstanceTypeId, value.CpuCoreCount, core, value.MemorySize))
-							}
-						}
-					}
-					expectedInstanceTypes := expectedEqualMoreCpus
-					if len(expectedEqualCpus) > 0 {
-						expectedInstanceTypes = expectedEqualCpus
-					}
-
-					if out, ok := d.GetOk("is_outdated"); !(ok && out.(bool)) {
-						core := "Core"
-						if instanceTypeObject.CpuCoreCount > 1 {
-							core = "Cores"
-						}
-						return nil, fmt.Errorf("The current instance type %s(%d%s,%.0fGB) has been outdated. Expect to use the upgraded instance types: %s. You can keep the instance type %s by setting 'is_outdated' to true.",
-							instanceType, instanceTypeObject.CpuCoreCount, core, instanceTypeObject.MemorySize, strings.Join(expectedInstanceTypes, ", "), instanceType)
-					} else {
-						// Check none io optimized and cloud
-						_, typeOk := NoneIoOptimizedInstanceType[instanceType]
-						_, famOk := NoneIoOptimizedFamily[targetFamily]
-						_, halfOk := HalfIoOptimizedFamily[targetFamily]
-						if typeOk || famOk {
-							if outDisk {
-								ioOptimized = ecs.IoOptimizedNone
-							} else {
-								return nil, fmt.Errorf("The current instance type %s is no I/O optimized, and it only supports 'cloud' as instance system disk. "+
-									"Suggest to upgrade instance type and use efficient disk. Expected instance types: %s.", instanceType, strings.Join(expectedInstanceTypes, ", "))
-							}
-						} else if outDisk {
-							if halfOk {
-								ioOptimized = ecs.IoOptimizedNone
-							} else {
-								return nil, fmt.Errorf("The current instance type %s is I/O optimized, and it can't support 'cloud' as instance system disk. "+
-									"Suggest to upgrade instance type and use efficient disk. Expectd instance types: %s.", instanceType, strings.Join(expectedInstanceTypes, ", "))
-							}
-						}
-					}
-				}
-
-			} else if err := getExpectInstanceTypesAndFormatOut(zoneId, targetFamily, getRegion(d, meta), mapUpgradedInstanceFamilies); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	if instanceTypeFamily, ok := d.GetOk("instance_type_family"); ok {
-
-		if !strings.HasPrefix(instanceTypeFamily.(string), "ecs.") {
-			return nil, fmt.Errorf("Invalid instance_type_family: %s. Please modify it and try again.", instanceTypeFamily.(string))
-		}
-
-		_, outdatedOk := mapOutdatedInstanceFamilies[instanceTypeFamily.(string)]
-		_, expectedOk := mapUpgradedInstanceFamilies[instanceTypeFamily.(string)]
-		if outdatedOk || !expectedOk {
-			if err := getExpectInstanceTypesAndFormatOut(zoneId, instanceTypeFamily.(string), getRegion(d, meta), mapUpgradedInstanceFamilies); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	validData[ZoneKey] = mapZones
-	validData[InstanceTypeKey] = mapSupportedInstanceTypes
-	validData[UpgradedInstanceTypeKey] = mapUpgradedInstanceTypes
-	validData[OutdatedInstanceTypeKey] = mapOutdatedInstanceTypes
-	validData[UpgradedInstanceTypeFamilyKey] = mapUpgradedInstanceFamilies
-	validData[OutdatedInstanceTypeFamilyKey] = mapOutdatedInstanceFamilies
-	validData[OutdatedDiskCategoryKey] = mapOutdatedDiskCategories
-	validData[DiskCategoryKey] = mapDiskCategories
-	validData[IoOptimizedKey] = ioOptimized
-
-	return validData, nil
+	return
 }
 
-func (client *AliyunClient) FetchSpecifiedInstanceTypeFamily(regionId common.Region, zoneId string, generations []string, all_zones []ecs.ZoneType) (map[string]ecs.InstanceTypeFamily, map[string]ecs.InstanceTypeFamily, error) {
-	// Describe specified series instance type families
-	mapOutdatedInstanceFamilies := make(map[string]ecs.InstanceTypeFamily)
-	mapUpgradedInstanceFamilies := make(map[string]ecs.InstanceTypeFamily)
-	response, err := client.ecsconn.DescribeInstanceTypeFamilies(&ecs.DescribeInstanceTypeFamiliesArgs{
-		RegionId: regionId,
+func (s *EcsService) InstanceTypeValidation(targetType, zoneId string, validZones []ecs.AvailableZoneInDescribeAvailableResource) error {
+
+	mapInstanceTypeToZones := make(map[string]string)
+	var expectedInstanceTypes []string
+	for _, zone := range validZones {
+		if zoneId != "" && zoneId != zone.ZoneId {
+			continue
+		}
+		for _, r := range zone.AvailableResources.AvailableResource {
+			if r.Type == string(InstanceTypeResource) {
+				for _, t := range r.SupportedResources.SupportedResource {
+					if t.Status == string(SoldOut) {
+						continue
+					}
+					if targetType == t.Value {
+						return nil
+					}
+
+					if _, ok := mapInstanceTypeToZones[t.Value]; !ok {
+						expectedInstanceTypes = append(expectedInstanceTypes, t.Value)
+						mapInstanceTypeToZones[t.Value] = t.Value
+					}
+				}
+			}
+		}
+	}
+	if zoneId != "" {
+		return WrapError(Error("The instance type %s is solded out or is not supported in the zone %s. Expected instance types: %s", targetType, zoneId, strings.Join(expectedInstanceTypes, ", ")))
+	}
+	return WrapError(Error("The instance type %s is solded out or is not supported in the region %s. Expected instance types: %s", targetType, s.client.RegionId, strings.Join(expectedInstanceTypes, ", ")))
+}
+
+func (s *EcsService) QueryInstancesWithKeyPair(instanceIdsStr, keyPair string) (instanceIds []string, instances []ecs.InstanceInDescribeInstances, err error) {
+
+	request := ecs.CreateDescribeInstancesRequest()
+	request.RegionId = s.client.RegionId
+	request.PageSize = requests.NewInteger(PageSizeLarge)
+	request.PageNumber = requests.NewInteger(1)
+	request.InstanceIds = instanceIdsStr
+	request.KeyPairName = keyPair
+	for {
+		raw, e := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.DescribeInstances(request)
+		})
+		if e != nil {
+			err = WrapErrorf(e, DefaultErrorMsg, keyPair, request.GetActionName(), AlibabaCloudSdkGoERROR)
+			return
+		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		object, _ := raw.(*ecs.DescribeInstancesResponse)
+		if len(object.Instances.Instance) < 0 {
+			return
+		}
+		for _, inst := range object.Instances.Instance {
+			instanceIds = append(instanceIds, inst.InstanceId)
+			instances = append(instances, inst)
+		}
+		if len(instances) < PageSizeLarge {
+			break
+		}
+		if page, e := getNextpageNumber(request.PageNumber); e != nil {
+			err = WrapErrorf(e, DefaultErrorMsg, keyPair, request.GetActionName(), AlibabaCloudSdkGoERROR)
+			return
+		} else {
+			request.PageNumber = page
+		}
+	}
+	return
+}
+
+func (s *EcsService) DescribeKeyPair(id string) (keyPair ecs.KeyPair, err error) {
+	request := ecs.CreateDescribeKeyPairsRequest()
+	request.RegionId = s.client.RegionId
+	request.KeyPairName = id
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeKeyPairs(request)
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("Error DescribeInstanceTypeFamilies: %#v.", err)
+		return keyPair, WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
 	}
-	log.Printf("All the instance families in the region %s: %#v", regionId, response)
-
-	tempOutdatedMap := make(map[string]string)
-	for _, gen := range generations {
-		tempOutdatedMap[gen] = gen
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	object, _ := raw.(*ecs.DescribeKeyPairsResponse)
+	if len(object.KeyPairs.KeyPair) < 1 || object.KeyPairs.KeyPair[0].KeyPairName != id {
+		return keyPair, WrapErrorf(Error(GetNotFoundMessage("KeyPair", id)), NotFoundMsg, ProviderERROR)
 	}
+	return object.KeyPairs.KeyPair[0], nil
 
-	for _, family := range response.InstanceTypeFamilies.InstanceTypeFamily {
-		if _, ok := tempOutdatedMap[family.Generation]; ok {
-			mapOutdatedInstanceFamilies[family.InstanceTypeFamilyId] = family
-			continue
-		}
-		mapUpgradedInstanceFamilies[family.InstanceTypeFamilyId] = family
-	}
-
-	// Filter specified zone's instance type families, and make them fit for specified generation
-	if zoneId != "" {
-		outdatedValidFamilies := make(map[string]ecs.InstanceTypeFamily)
-		upgradedValidFamilies := make(map[string]ecs.InstanceTypeFamily)
-		for _, zone := range all_zones {
-			if zone.ZoneId == zoneId {
-				for _, resource := range zone.AvailableResources.ResourcesInfo {
-					families := resource.InstanceTypeFamilies[ecs.SupportedInstanceTypeFamily]
-					for _, familyId := range families {
-						if val, ok := mapOutdatedInstanceFamilies[familyId]; ok {
-							outdatedValidFamilies[familyId] = val
-						}
-						if val, ok := mapUpgradedInstanceFamilies[familyId]; ok {
-							upgradedValidFamilies[familyId] = val
-						}
-					}
-
-				}
-				return outdatedValidFamilies, upgradedValidFamilies, nil
-			}
-		}
-	}
-	log.Printf("New generation instance families: %#v.\n Outdated instance families: %#v.",
-		mapUpgradedInstanceFamilies, mapOutdatedInstanceFamilies)
-	return mapOutdatedInstanceFamilies, mapUpgradedInstanceFamilies, nil
 }
 
-func (client *AliyunClient) FetchSpecifiedInstanceTypesByFamily(zoneId, instanceTypeFamily string, all_zones []ecs.ZoneType) (map[string]ecs.InstanceTypeItemType, error) {
-	// Describe all instance types of specified families
-	types, err := client.ecsconn.DescribeInstanceTypesNew(&ecs.DescribeInstanceTypesArgs{
-		InstanceTypeFamily: instanceTypeFamily,
+func (s *EcsService) DescribeKeyPairAttachment(id string) (keyPair ecs.KeyPair, err error) {
+	parts, err := ParseResourceId(id, 2)
+	if err != nil {
+		if IsExpectedErrors(err, []string{"InvalidKeyPair.NotFound"}) {
+			err = WrapErrorf(err, NotFoundMsg, AlibabaCloudSdkGoERROR)
+		}
+		return
+	}
+	keyPairName := parts[0]
+	keyPair, err = s.DescribeKeyPair(keyPairName)
+	if err != nil {
+		return keyPair, WrapError(err)
+	}
+	if keyPair.KeyPairName != keyPairName {
+		err = WrapErrorf(Error(GetNotFoundMessage("KeyPairAttachment", id)), NotFoundMsg, ProviderERROR)
+	}
+	return keyPair, nil
+
+}
+
+func (s *EcsService) DescribeDisk(id string) (disk ecs.DiskInDescribeDisks, err error) {
+	request := ecs.CreateDescribeDisksRequest()
+	request.DiskIds = convertListToJsonString([]interface{}{id})
+	request.RegionId = s.client.RegionId
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeDisks(request)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("Error DescribeInstanceTypes: %#v.", err)
+		return disk, WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
 	}
-	log.Printf("All the instance types of family %s: %#v", instanceTypeFamily, types)
-	instanceTypes := make(map[string]ecs.InstanceTypeItemType)
-	for _, ty := range types {
-		instanceTypes[ty.InstanceTypeId] = ty
+	response, _ := raw.(*ecs.DescribeDisksResponse)
+	if len(response.Disks.Disk) < 1 || response.Disks.Disk[0].DiskId != id {
+		err = WrapErrorf(Error(GetNotFoundMessage("Disk", id)), NotFoundMsg, ProviderERROR)
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	return response.Disks.Disk[0], nil
+}
+
+func (s *EcsService) DescribeDiskAttachment(id string) (disk ecs.DiskInDescribeDisks, err error) {
+	parts, err := ParseResourceId(id, 2)
+	if err != nil {
+		return disk, WrapError(err)
+	}
+	disk, err = s.DescribeDisk(parts[0])
+	if err != nil {
+		return disk, WrapError(err)
 	}
 
-	// Filter specified zone's instance types, and make them fit for specified families
-	if zoneId != "" {
-		validInstanceTypes := make(map[string]ecs.InstanceTypeItemType)
-		for _, zone := range all_zones {
-			if zone.ZoneId == zoneId {
-				for _, resource := range zone.AvailableResources.ResourcesInfo {
-					types := resource.InstanceTypes[ecs.SupportedInstanceType]
-					for _, ty := range types {
-						if val, ok := instanceTypes[ty]; ok {
-							validInstanceTypes[ty] = val
-						}
-					}
+	if disk.InstanceId != parts[1] && disk.Status != string(InUse) {
+		err = WrapErrorf(Error(GetNotFoundMessage("DiskAttachment", id)), NotFoundMsg, ProviderERROR)
+	}
+	return
+}
 
-				}
-				return validInstanceTypes, nil
+func (s *EcsService) DescribeDisksByType(instanceId string, diskType DiskType) (disk []ecs.DiskInDescribeDisks, err error) {
+	request := ecs.CreateDescribeDisksRequest()
+	request.RegionId = s.client.RegionId
+	if instanceId != "" {
+		request.InstanceId = instanceId
+	}
+	request.DiskType = string(diskType)
+
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeDisks(request)
+	})
+	if err != nil {
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	resp, _ := raw.(*ecs.DescribeDisksResponse)
+	if resp == nil {
+		return
+	}
+	return resp.Disks.Disk, nil
+}
+
+func (s *EcsService) DescribeTags(resourceId string, resourceType TagResourceType) (tags []ecs.TagInDescribeTags, err error) {
+	request := ecs.CreateDescribeTagsRequest()
+	request.RegionId = s.client.RegionId
+	request.ResourceType = string(resourceType)
+	request.ResourceId = resourceId
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeTags(request)
+	})
+	if err != nil {
+		err = WrapErrorf(err, DefaultErrorMsg, resourceId, request.GetActionName(), AlibabaCloudSdkGoERROR)
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ecs.DescribeTagsResponse)
+	if len(response.Tags.Tag) < 1 {
+		err = WrapErrorf(Error(GetNotFoundMessage("Tags", resourceId)), NotFoundMsg, ProviderERROR)
+		return
+	}
+
+	return response.Tags.Tag, nil
+}
+
+func (s *EcsService) DescribeImageById(id string) (image ecs.ImageInDescribeImages, err error) {
+	request := ecs.CreateDescribeImagesRequest()
+	request.RegionId = s.client.RegionId
+	request.ImageId = id
+	request.Status = fmt.Sprintf("%s,%s,%s,%s,%s", "Creating", "Waiting", "Available", "UnAvailable", "CreateFailed")
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeImages(request)
+	})
+	if err != nil {
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	resp, _ := raw.(*ecs.DescribeImagesResponse)
+	if resp == nil || len(resp.Images.Image) < 1 {
+		return image, GetNotFoundErrorFromString(GetNotFoundMessage("Image", id))
+	}
+	return resp.Images.Image[0], nil
+}
+
+func (s *EcsService) deleteImage(d *schema.ResourceData) error {
+
+	object, err := s.DescribeImageById(d.Id())
+	if err != nil {
+		if NotFoundError(err) {
+			d.SetId("")
+			return nil
+		}
+		return WrapError(err)
+	}
+	request := ecs.CreateDeleteImageRequest()
+
+	if force, ok := d.GetOk("force"); ok {
+		request.Force = requests.NewBoolean(force.(bool))
+	}
+	request.RegionId = s.client.RegionId
+	request.ImageId = object.ImageId
+
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DeleteImage(request)
+	})
+
+	if err != nil {
+		return WrapErrorf(err, DefaultErrorMsg, d.Id(), request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	stateConf := BuildStateConf([]string{}, []string{}, d.Timeout(schema.TimeoutCreate), 3*time.Second, s.ImageStateRefreshFunc(d.Id(), []string{}))
+	if _, err := stateConf.WaitForState(); err != nil {
+		return WrapErrorf(err, IdMsg, d.Id())
+	}
+
+	return nil
+}
+
+func (s *EcsService) updateImage(d *schema.ResourceData) error {
+
+	d.Partial(true)
+
+	err := setTags(s.client, TagResourceImage, d)
+	if err != nil {
+		return WrapError(err)
+	} else {
+		d.SetPartial("tags")
+	}
+
+	request := ecs.CreateModifyImageAttributeRequest()
+	request.RegionId = s.client.RegionId
+	request.ImageId = d.Id()
+
+	if d.HasChange("description") || d.HasChange("name") || d.HasChange("image_name") {
+		if description, ok := d.GetOk("description"); ok {
+			request.Description = description.(string)
+		}
+		if imageName, ok := d.GetOk("image_name"); ok {
+			request.ImageName = imageName.(string)
+		} else {
+			if imageName, ok := d.GetOk("name"); ok {
+				request.ImageName = imageName.(string)
 			}
 		}
-	}
-	return instanceTypes, nil
-}
-
-func getExpectInstanceTypesAndFormatOut(zoneId, instanceTypeFamily string, regionId common.Region, mapInstanceFamilies map[string]ecs.InstanceTypeFamily) error {
-	var validFamilies []string
-
-	for key := range mapInstanceFamilies {
-		validFamilies = append(validFamilies, key)
-	}
-	if len(validFamilies) < 1 {
-		return fmt.Errorf("There is no available instance type family in the current availability zone." +
-			"Please change availability zone or region and try again.")
-	}
-	if zoneId == "" {
-		return fmt.Errorf("Instance type family %s is not supported in the region %s. Expected instance type families: %s.",
-			instanceTypeFamily, regionId, strings.Join(validFamilies, ", "))
-	}
-	return fmt.Errorf("Instance type family %s is not supported in the availability zone %s. Expected instance type families: %s.",
-		instanceTypeFamily, zoneId, strings.Join(validFamilies, ", "))
-}
-
-func (client *AliyunClient) QueryInstancesWithKeyPair(region common.Region, instanceIds, keypair string) ([]interface{}, []ecs.InstanceAttributesType, error) {
-	var instance_ids []interface{}
-	var instanceList []ecs.InstanceAttributesType
-
-	conn := client.ecsconn
-	args := &ecs.DescribeInstancesArgs{
-		RegionId: region,
-	}
-	pagination := getPagination(1, 50)
-	for true {
-		if instanceIds != "" {
-			args.InstanceIds = instanceIds
-		}
-		args.Pagination = pagination
-		instances, _, err := conn.DescribeInstances(args)
+		raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.ModifyImageAttribute(request)
+		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("Error DescribeInstances: %#v", err)
+			return WrapErrorf(err, DefaultErrorMsg, d.Id(), request.GetActionName(), AlibabaCloudSdkGoERROR)
 		}
-		for _, inst := range instances {
-			if inst.KeyPairName == keypair {
-				instance_ids = append(instance_ids, inst.InstanceId)
-				instanceList = append(instanceList, inst)
-			}
+		d.SetPartial("name")
+		d.SetPartial("image_name")
+		d.SetPartial("description")
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	}
+
+	d.Partial(false)
+	return nil
+}
+
+func (s *EcsService) DescribeNetworkInterface(id string) (networkInterface ecs.NetworkInterfaceSet, err error) {
+	request := ecs.CreateDescribeNetworkInterfacesRequest()
+	request.RegionId = s.client.RegionId
+	eniIds := []string{id}
+	request.NetworkInterfaceId = &eniIds
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeNetworkInterfaces(request)
+	})
+	if err != nil {
+		err = WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response := raw.(*ecs.DescribeNetworkInterfacesResponse)
+	if len(response.NetworkInterfaceSets.NetworkInterfaceSet) < 1 ||
+		response.NetworkInterfaceSets.NetworkInterfaceSet[0].NetworkInterfaceId != id {
+		err = WrapErrorf(Error(GetNotFoundMessage("NetworkInterface", id)), NotFoundMsg, ProviderERROR)
+		return
+	}
+
+	return response.NetworkInterfaceSets.NetworkInterfaceSet[0], nil
+}
+
+func (s *EcsService) DescribeNetworkInterfaceAttachment(id string) (networkInterface ecs.NetworkInterfaceSet, err error) {
+	parts, err := ParseResourceId(id, 2)
+
+	if err != nil {
+		return networkInterface, WrapError(err)
+	}
+	eniId, instanceId := parts[0], parts[1]
+	request := ecs.CreateDescribeNetworkInterfacesRequest()
+	request.RegionId = s.client.RegionId
+	request.InstanceId = instanceId
+	eniIds := []string{eniId}
+	request.NetworkInterfaceId = &eniIds
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeNetworkInterfaces(request)
+	})
+	if err != nil {
+		err = WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response := raw.(*ecs.DescribeNetworkInterfacesResponse)
+	if len(response.NetworkInterfaceSets.NetworkInterfaceSet) < 1 ||
+		response.NetworkInterfaceSets.NetworkInterfaceSet[0].NetworkInterfaceId != eniId {
+		err = WrapErrorf(Error(GetNotFoundMessage("NetworkInterfaceAttachment", id)), NotFoundMsg, ProviderERROR)
+		return
+	}
+
+	return response.NetworkInterfaceSets.NetworkInterfaceSet[0], nil
+}
+
+// WaitForInstance waits for instance to given status
+func (s *EcsService) WaitForEcsInstance(instanceId string, status Status, timeout int) error {
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	for {
+		instance, err := s.DescribeInstance(instanceId)
+		if err != nil && !NotFoundError(err) {
+			return err
 		}
-		if len(instances) < pagination.PageSize {
+		if instance.Status == string(status) {
+			//Sleep one more time for timing issues
+			time.Sleep(DefaultIntervalMedium * time.Second)
 			break
 		}
-		pagination.PageNumber += 1
+		timeout = timeout - DefaultIntervalShort
+		if timeout <= 0 {
+			return GetTimeErrorFromString(GetTimeoutMessage("ECS Instance", string(status)))
+		}
+		time.Sleep(DefaultIntervalShort * time.Second)
+
 	}
-	return instance_ids, instanceList, nil
+	return nil
+}
+
+// WaitForInstance waits for instance to given status
+func (s *EcsService) InstanceStateRefreshFunc(id string, failStates []string) resource.StateRefreshFunc {
+	return func() (interface{}, string, error) {
+		object, err := s.DescribeInstance(id)
+		if err != nil {
+			if NotFoundError(err) {
+				// Set this to nil as if we didn't find anything.
+				return nil, "", nil
+			}
+			return nil, "", WrapError(err)
+		}
+
+		for _, failState := range failStates {
+			if object.Status == failState {
+				return object, object.Status, WrapError(Error(FailedToReachTargetStatus, object.Status))
+			}
+		}
+
+		return object, object.Status, nil
+	}
+}
+
+func (s *EcsService) WaitForDisk(id string, status Status, timeout int) error {
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+
+	for {
+		object, err := s.DescribeDisk(id)
+		if err != nil {
+			if NotFoundError(err) {
+				if status == Deleted {
+					return nil
+				}
+			} else {
+				return WrapError(err)
+			}
+		}
+		// Disk need 3-5 seconds to get ExpiredTime after the status is available
+		if object.Status == string(status) && object.ExpiredTime != "" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return WrapErrorf(err, WaitTimeoutMsg, id, GetFunc(1), timeout, object.Status, string(status), ProviderERROR)
+		}
+
+	}
+}
+
+func (s *EcsService) WaitForSecurityGroup(id string, status Status, timeout int) error {
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+
+	for {
+		_, err := s.DescribeSecurityGroup(id)
+		if err != nil {
+			if NotFoundError(err) {
+				if status == Deleted {
+					return nil
+				}
+			} else {
+				return WrapError(err)
+			}
+		}
+		if time.Now().After(deadline) {
+			return WrapErrorf(err, WaitTimeoutMsg, id, GetFunc(1), timeout, Null, string(status), ProviderERROR)
+		}
+
+	}
+}
+
+func (s *EcsService) WaitForKeyPair(id string, status Status, timeout int) error {
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+
+	for {
+		_, err := s.DescribeKeyPair(id)
+		if err != nil {
+			if NotFoundError(err) {
+				if status == Deleted {
+					return nil
+				}
+			} else {
+				return WrapError(err)
+			}
+		}
+		if time.Now().After(deadline) {
+			return WrapErrorf(err, WaitTimeoutMsg, id, GetFunc(1), timeout, Null, string(status), ProviderERROR)
+		}
+
+	}
+}
+
+func (s *EcsService) WaitForDiskAttachment(id string, status Status, timeout int) error {
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+	for {
+		object, err := s.DescribeDiskAttachment(id)
+		if err != nil {
+			if NotFoundError(err) {
+				if status == Deleted {
+					return nil
+				}
+			} else {
+				return WrapError(err)
+			}
+		}
+		if object.Status == string(status) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return WrapErrorf(err, WaitTimeoutMsg, id, GetFunc(1), timeout, object.Status, string(status), ProviderERROR)
+		}
+
+	}
+}
+
+func (s *EcsService) WaitForNetworkInterface(id string, status Status, timeout int) error {
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+
+	for {
+		object, err := s.DescribeNetworkInterface(id)
+		if err != nil {
+			if NotFoundError(err) {
+				if status == Deleted {
+					return nil
+				}
+			} else {
+				return WrapError(err)
+			}
+		}
+
+		if object.Status == string(status) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return WrapErrorf(err, WaitTimeoutMsg, id, GetFunc(1), timeout, object.Status, string(status), ProviderERROR)
+		}
+	}
+	return nil
+}
+
+func (s *EcsService) QueryPrivateIps(eniId string) ([]string, error) {
+	if eni, err := s.DescribeNetworkInterface(eniId); err != nil {
+		return nil, fmt.Errorf("Describe NetworkInterface(%s) failed, %s", eniId, err)
+	} else {
+		filterIps := make([]string, 0, len(eni.PrivateIpSets.PrivateIpSet))
+		for i := range eni.PrivateIpSets.PrivateIpSet {
+			if eni.PrivateIpSets.PrivateIpSet[i].Primary {
+				continue
+			}
+			filterIps = append(filterIps, eni.PrivateIpSets.PrivateIpSet[i].PrivateIpAddress)
+		}
+		return filterIps, nil
+	}
+}
+
+func (s *EcsService) WaitForVpcAttributesChanged(instanceId, vswitchId, privateIp string) error {
+	deadline := time.Now().Add(DefaultTimeout * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			return WrapError(Error("Wait for VPC attributes changed timeout"))
+		}
+		time.Sleep(DefaultIntervalShort * time.Second)
+
+		instance, err := s.DescribeInstance(instanceId)
+		if err != nil {
+			return WrapError(err)
+		}
+
+		if instance.VpcAttributes.PrivateIpAddress.IpAddress[0] != privateIp {
+			continue
+		}
+
+		if instance.VpcAttributes.VSwitchId != vswitchId {
+			continue
+		}
+
+		return nil
+	}
+}
+
+func (s *EcsService) WaitForPrivateIpsCountChanged(eniId string, count int) error {
+	deadline := time.Now().Add(DefaultTimeout * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Wait for private IP addrsses count changed timeout")
+		}
+		time.Sleep(DefaultIntervalShort * time.Second)
+
+		ips, err := s.QueryPrivateIps(eniId)
+		if err != nil {
+			return fmt.Errorf("Query private IP failed, %s", err)
+		}
+		if len(ips) == count {
+			return nil
+		}
+	}
+}
+
+func (s *EcsService) WaitForPrivateIpsListChanged(eniId string, ipList []string) error {
+	deadline := time.Now().Add(DefaultTimeout * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Wait for private IP addrsses list changed timeout")
+		}
+		time.Sleep(DefaultIntervalShort * time.Second)
+
+		ips, err := s.QueryPrivateIps(eniId)
+		if err != nil {
+			return fmt.Errorf("Query private IP failed, %s", err)
+		}
+
+		if len(ips) != len(ipList) {
+			continue
+		}
+
+		diff := false
+		for i := range ips {
+			exist := false
+			for j := range ipList {
+				if ips[i] == ipList[j] {
+					exist = true
+					break
+				}
+			}
+			if !exist {
+				diff = true
+				break
+			}
+		}
+
+		if !diff {
+			return nil
+		}
+	}
+}
+
+func (s *EcsService) WaitForModifySecurityGroupPolicy(id, target string, timeout int) error {
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+	for {
+		object, err := s.DescribeSecurityGroup(id)
+		if err != nil {
+			return WrapError(err)
+		}
+		if object.InnerAccessPolicy == target {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return WrapErrorf(err, WaitTimeoutMsg, id, GetFunc(1), timeout, object.InnerAccessPolicy, target, ProviderERROR)
+		}
+	}
+}
+
+func (s *EcsService) AttachKeyPair(keyName string, instanceIds []interface{}) error {
+	request := ecs.CreateAttachKeyPairRequest()
+	request.RegionId = s.client.RegionId
+	request.KeyPairName = keyName
+	request.InstanceIds = convertListToJsonString(instanceIds)
+	err := resource.Retry(5*time.Minute, func() *resource.RetryError {
+		raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.AttachKeyPair(request)
+		})
+		if err != nil {
+			if IsExpectedErrors(err, []string{"ServiceUnavailable"}) {
+				return resource.RetryableError(err)
+			}
+			return resource.NonRetryableError(err)
+		}
+		addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+		return nil
+	})
+	if err != nil {
+		return WrapErrorf(err, DefaultErrorMsg, keyName, request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	return nil
+}
+
+func (s *EcsService) SnapshotStateRefreshFunc(id string, failStates []string) resource.StateRefreshFunc {
+	return func() (interface{}, string, error) {
+		object, err := s.DescribeSnapshot(id)
+		if err != nil {
+			if NotFoundError(err) {
+				// Set this to nil as if we didn't find anything.
+				return nil, "", nil
+			}
+			return nil, "", WrapError(err)
+		}
+
+		for _, failState := range failStates {
+			if object.Status == failState {
+				return object, object.Status, WrapError(Error(FailedToReachTargetStatus, object.Status))
+			}
+		}
+		return object, object.Status, nil
+	}
+}
+
+func (s *EcsService) ImageStateRefreshFunc(id string, failStates []string) resource.StateRefreshFunc {
+	return func() (interface{}, string, error) {
+		object, err := s.DescribeImageById(id)
+		if err != nil {
+			if NotFoundError(err) {
+				// Set this to nil as if we didn't find anything.
+				return nil, "", nil
+			}
+			return nil, "", WrapError(err)
+		}
+
+		for _, failState := range failStates {
+			if object.Status == failState {
+				return object, object.Status, WrapError(Error(FailedToReachTargetStatus, object.Status))
+			}
+		}
+		return object, object.Status, nil
+	}
+}
+
+func (s *EcsService) TaskStateRefreshFunc(id string, failStates []string) resource.StateRefreshFunc {
+	return func() (interface{}, string, error) {
+		object, err := s.DescribeTaskById(id)
+		if err != nil {
+			if NotFoundError(err) {
+				// Set this to nil as if we didn't find anything.
+				return nil, "", nil
+			}
+			return nil, "", WrapError(err)
+		}
+		for _, failState := range failStates {
+			if object.TaskStatus == failState {
+				return object, object.TaskStatus, WrapError(Error(FailedToReachTargetStatus, object.TaskStatus))
+			}
+		}
+		return object, object.TaskStatus, nil
+	}
+}
+
+func (s *EcsService) DescribeTaskById(id string) (task *ecs.DescribeTaskAttributeResponse, err error) {
+	request := ecs.CreateDescribeTaskAttributeRequest()
+	request.TaskId = id
+
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeTaskAttribute(request)
+	})
+	if err != nil {
+		return task, WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	task, _ = raw.(*ecs.DescribeTaskAttributeResponse)
+
+	if task.TaskId == "" {
+		return task, GetNotFoundErrorFromString(GetNotFoundMessage("task", id))
+	}
+	return task, nil
+}
+
+func (s *EcsService) DescribeSnapshot(id string) (*ecs.Snapshot, error) {
+	snapshot := &ecs.Snapshot{}
+	request := ecs.CreateDescribeSnapshotsRequest()
+	request.RegionId = s.client.RegionId
+	request.SnapshotIds = fmt.Sprintf("[\"%s\"]", id)
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeSnapshots(request)
+	})
+	if err != nil {
+		return snapshot, WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response := raw.(*ecs.DescribeSnapshotsResponse)
+	if len(response.Snapshots.Snapshot) != 1 || response.Snapshots.Snapshot[0].SnapshotId != id {
+		return snapshot, WrapErrorf(Error(GetNotFoundMessage("Snapshot", id)), NotFoundMsg, ProviderERROR)
+	}
+	return &response.Snapshots.Snapshot[0], nil
+}
+
+func (s *EcsService) DescribeSnapshotPolicy(id string) (*ecs.AutoSnapshotPolicy, error) {
+	policy := &ecs.AutoSnapshotPolicy{}
+	request := ecs.CreateDescribeAutoSnapshotPolicyExRequest()
+	request.AutoSnapshotPolicyId = id
+	request.RegionId = s.client.RegionId
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeAutoSnapshotPolicyEx(request)
+	})
+	if err != nil {
+		return policy, WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+
+	response := raw.(*ecs.DescribeAutoSnapshotPolicyExResponse)
+	if len(response.AutoSnapshotPolicies.AutoSnapshotPolicy) != 1 ||
+		response.AutoSnapshotPolicies.AutoSnapshotPolicy[0].AutoSnapshotPolicyId != id {
+		return policy, WrapErrorf(Error(GetNotFoundMessage("SnapshotPolicy", id)), NotFoundMsg, ProviderERROR)
+	}
+
+	return &response.AutoSnapshotPolicies.AutoSnapshotPolicy[0], nil
+}
+
+func (s *EcsService) DescribeReservedInstance(id string) (reservedInstance ecs.ReservedInstance, err error) {
+	request := ecs.CreateDescribeReservedInstancesRequest()
+	var balance = &[]string{id}
+	request.ReservedInstanceId = balance
+	request.RegionId = s.client.RegionId
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeReservedInstances(request)
+	})
+	if err != nil {
+		return reservedInstance, WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response, _ := raw.(*ecs.DescribeReservedInstancesResponse)
+
+	if len(response.ReservedInstances.ReservedInstance) != 1 ||
+		response.ReservedInstances.ReservedInstance[0].ReservedInstanceId != id {
+		return reservedInstance, GetNotFoundErrorFromString(GetNotFoundMessage("PurchaseReservedInstance", id))
+	}
+	return response.ReservedInstances.ReservedInstance[0], nil
+}
+
+func (s *EcsService) WaitForReservedInstance(id string, status Status, timeout int) error {
+	deadLine := time.Now().Add(time.Duration(timeout) * time.Second)
+	for {
+		reservedInstance, err := s.DescribeReservedInstance(id)
+		if err != nil {
+			if NotFoundError(err) {
+				if status == Deleted {
+					return nil
+				}
+			} else {
+				return WrapError(err)
+			}
+		}
+
+		if reservedInstance.Status == string(status) {
+			return nil
+		}
+
+		if time.Now().After(deadLine) {
+			return WrapErrorf(GetTimeErrorFromString("ECS WaitForSnapshotPolicy"), WaitTimeoutMsg, id, GetFunc(1), timeout, reservedInstance.Status, string(status), ProviderERROR)
+		}
+		time.Sleep(DefaultIntervalShort * time.Second)
+	}
+}
+
+func (s *EcsService) WaitForSnapshotPolicy(id string, status Status, timeout int) error {
+	deadLine := time.Now().Add(time.Duration(timeout) * time.Second)
+	for {
+		snapshotPolicy, err := s.DescribeSnapshotPolicy(id)
+		if err != nil {
+			if NotFoundError(err) {
+				if status == Deleted {
+					return nil
+				}
+			}
+			return WrapError(err)
+		}
+
+		if snapshotPolicy.Status == string(status) {
+			return nil
+		}
+
+		if time.Now().After(deadLine) {
+			return WrapErrorf(GetTimeErrorFromString("ECS WaitForSnapshotPolicy"), WaitTimeoutMsg, id, GetFunc(1), timeout, snapshotPolicy.Status, string(status), ProviderERROR)
+		}
+		time.Sleep(DefaultIntervalShort * time.Second)
+	}
+}
+
+func (s *EcsService) DescribeLaunchTemplate(id string) (set ecs.LaunchTemplateSet, err error) {
+
+	request := ecs.CreateDescribeLaunchTemplatesRequest()
+	request.RegionId = s.client.RegionId
+	request.LaunchTemplateId = &[]string{id}
+
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeLaunchTemplates(request)
+	})
+	if err != nil {
+		err = WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response := raw.(*ecs.DescribeLaunchTemplatesResponse)
+	if len(response.LaunchTemplateSets.LaunchTemplateSet) != 1 ||
+		response.LaunchTemplateSets.LaunchTemplateSet[0].LaunchTemplateId != id {
+		err = WrapErrorf(Error(GetNotFoundMessage("LaunchTemplate", id)), NotFoundMsg, ProviderERROR)
+		return
+	}
+
+	return response.LaunchTemplateSets.LaunchTemplateSet[0], nil
+
+}
+
+func (s *EcsService) DescribeLaunchTemplateVersion(id string, version int) (set ecs.LaunchTemplateVersionSet, err error) {
+
+	request := ecs.CreateDescribeLaunchTemplateVersionsRequest()
+	request.RegionId = s.client.RegionId
+	request.LaunchTemplateId = id
+	request.LaunchTemplateVersion = &[]string{strconv.FormatInt(int64(version), 10)}
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeLaunchTemplateVersions(request)
+	})
+	if err != nil {
+		if IsExpectedErrors(err, []string{"InvalidLaunchTemplate.NotFound"}) {
+			err = WrapErrorf(err, NotFoundMsg, AlibabaCloudSdkGoERROR)
+			return
+		}
+		err = WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+		return
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	response := raw.(*ecs.DescribeLaunchTemplateVersionsResponse)
+	if len(response.LaunchTemplateVersionSets.LaunchTemplateVersionSet) != 1 ||
+		response.LaunchTemplateVersionSets.LaunchTemplateVersionSet[0].LaunchTemplateId != id {
+		err = WrapErrorf(Error(GetNotFoundMessage("LaunchTemplateVersion", id)), NotFoundMsg, ProviderERROR)
+		return
+	}
+
+	return response.LaunchTemplateVersionSets.LaunchTemplateVersionSet[0], nil
+
+}
+
+func (s *EcsService) WaitForLaunchTemplate(id string, status Status, timeout int) error {
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+	for {
+		object, err := s.DescribeLaunchTemplate(id)
+		if err != nil {
+			if NotFoundError(err) {
+				if status == Deleted {
+					return nil
+				}
+			} else {
+				return WrapError(err)
+			}
+		}
+		if object.LaunchTemplateId == id && string(status) != string(Deleted) {
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return WrapErrorf(err, WaitTimeoutMsg, id, GetFunc(1), timeout, Null, string(status), ProviderERROR)
+		}
+		time.Sleep(DefaultIntervalShort * time.Second)
+	}
+}
+
+func (s *EcsService) DescribeImageShareByImageId(id string) (imageShare *ecs.DescribeImageSharePermissionResponse, err error) {
+	request := ecs.CreateDescribeImageSharePermissionRequest()
+	request.RegionId = s.client.RegionId
+	parts, err := ParseResourceId(id, 2)
+	if err != nil {
+		return imageShare, WrapError(err)
+	}
+	request.ImageId = parts[0]
+	raw, err := s.client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+		return ecsClient.DescribeImageSharePermission(request)
+	})
+	if err != nil {
+		if IsExpectedErrors(err, []string{"InvalidImageId.NotFound"}) {
+			return imageShare, WrapErrorf(err, NotFoundMsg, AlibabaCloudSdkGoERROR)
+		}
+		return imageShare, WrapErrorf(err, DefaultErrorMsg, id, request.GetActionName(), AlibabaCloudSdkGoERROR)
+	}
+	addDebug(request.GetActionName(), raw, request.RpcRequest, request)
+	resp, _ := raw.(*ecs.DescribeImageSharePermissionResponse)
+	if len(resp.Accounts.Account) == 0 {
+		return imageShare, WrapErrorf(Error(GetNotFoundMessage("ModifyImageSharePermission", id)), NotFoundMsg, ProviderERROR)
+	}
+	return resp, nil
+}
+
+func (s *EcsService) tagsToMapForDisk(tags []ecs.TagInDescribeDisks) map[string]string {
+	result := make(map[string]string)
+	for _, t := range tags {
+		if !s.ecsTagIgnoredForDisk(t) {
+			result[t.TagKey] = t.TagValue
+		}
+	}
+
+	return result
+}
+
+func (s *EcsService) ecsTagIgnoredForDisk(t ecs.TagInDescribeDisks) bool {
+	filter := []string{"^aliyun", "^acs:", "^http://", "^https://"}
+	for _, v := range filter {
+		log.Printf("[DEBUG] Matching prefix %v with %v\n", v, t.TagKey)
+		ok, _ := regexp.MatchString(v, t.TagKey)
+		if ok {
+			log.Printf("[DEBUG] Found Alibaba Cloud specific tag %s (val: %s), ignoring.\n", t.TagKey, t.TagValue)
+			return true
+		}
+	}
+	return false
+}
+
+func (s *EcsService) tagsToMapForInstance(tags []ecs.TagInDescribeInstances) map[string]string {
+	result := make(map[string]string)
+	for _, t := range tags {
+		if !s.ecsTagIgnoredForInstance(t) {
+			result[t.TagKey] = t.TagValue
+		}
+	}
+
+	return result
+}
+
+func (s *EcsService) ecsTagIgnoredForInstance(t ecs.TagInDescribeInstances) bool {
+	filter := []string{"^aliyun", "^acs:", "^http://", "^https://"}
+	for _, v := range filter {
+		log.Printf("[DEBUG] Matching prefix %v with %v\n", v, t.TagKey)
+		ok, _ := regexp.MatchString(v, t.TagKey)
+		if ok {
+			log.Printf("[DEBUG] Found Alibaba Cloud specific tag %s (val: %s), ignoring.\n", t.TagKey, t.TagValue)
+			return true
+		}
+	}
+	return false
+}
+
+func (s *EcsService) tagsToMapForKeyPair(tags []ecs.TagInDescribeKeyPairs) map[string]string {
+	result := make(map[string]string)
+	for _, t := range tags {
+		if !s.ecsTagIgnoredForKeyPair(t) {
+			result[t.TagKey] = t.TagValue
+		}
+	}
+
+	return result
+}
+
+func (s *EcsService) ecsTagIgnoredForKeyPair(t ecs.TagInDescribeKeyPairs) bool {
+	filter := []string{"^aliyun", "^acs:", "^http://", "^https://"}
+	for _, v := range filter {
+		log.Printf("[DEBUG] Matching prefix %v with %v\n", v, t.TagKey)
+		ok, _ := regexp.MatchString(v, t.TagKey)
+		if ok {
+			log.Printf("[DEBUG] Found Alibaba Cloud specific tag %s (val: %s), ignoring.\n", t.TagKey, t.TagValue)
+			return true
+		}
+	}
+	return false
+}
+
+func (s *EcsService) tagsToMapForEni(tags []ecs.TagInDescribeNetworkInterfaces) map[string]string {
+	result := make(map[string]string)
+	for _, t := range tags {
+		if !s.ecsTagIgnoredForEni(t) {
+			result[t.TagKey] = t.TagValue
+		}
+	}
+
+	return result
+}
+
+func (s *EcsService) ecsTagIgnoredForEni(t ecs.TagInDescribeNetworkInterfaces) bool {
+	filter := []string{"^aliyun", "^acs:", "^http://", "^https://"}
+	for _, v := range filter {
+		log.Printf("[DEBUG] Matching prefix %v with %v\n", v, t.TagKey)
+		ok, _ := regexp.MatchString(v, t.TagKey)
+		if ok {
+			log.Printf("[DEBUG] Found Alibaba Cloud specific tag %s (val: %s), ignoring.\n", t.TagKey, t.TagValue)
+			return true
+		}
+	}
+	return false
+}
+
+func (s *EcsService) tagsToMapForSecurityGroup(tags []ecs.TagInDescribeSecurityGroups) map[string]string {
+	result := make(map[string]string)
+	for _, t := range tags {
+		if !s.ecsTagIgnoredForSecurityGroup(t) {
+			result[t.TagKey] = t.TagValue
+		}
+	}
+
+	return result
+}
+
+func (s *EcsService) ecsTagIgnoredForSecurityGroup(t ecs.TagInDescribeSecurityGroups) bool {
+	filter := []string{"^aliyun", "^acs:", "^http://", "^https://"}
+	for _, v := range filter {
+		log.Printf("[DEBUG] Matching prefix %v with %v\n", v, t.TagKey)
+		ok, _ := regexp.MatchString(v, t.TagKey)
+		if ok {
+			log.Printf("[DEBUG] Found Alibaba Cloud specific tag %s (val: %s), ignoring.\n", t.TagKey, t.TagValue)
+			return true
+		}
+	}
+	return false
+}
+
+func (s *EcsService) tagsToMapForImage(tags []ecs.TagInDescribeImages) map[string]string {
+	result := make(map[string]string)
+	for _, t := range tags {
+		if !s.ecsTagIgnoredForImage(t) {
+			result[t.TagKey] = t.TagValue
+		}
+	}
+
+	return result
+}
+
+func (s *EcsService) ecsTagIgnoredForImage(t ecs.TagInDescribeImages) bool {
+	filter := []string{"^aliyun", "^acs:", "^http://", "^https://"}
+	for _, v := range filter {
+		log.Printf("[DEBUG] Matching prefix %v with %v\n", v, t.TagKey)
+		ok, _ := regexp.MatchString(v, t.TagKey)
+		if ok {
+			log.Printf("[DEBUG] Found Alibaba Cloud specific tag %s (val: %s), ignoring.\n", t.TagKey, t.TagValue)
+			return true
+		}
+	}
+	return false
 }

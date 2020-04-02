@@ -76,13 +76,13 @@ func (client *Client) MoveResourceGroupWithCallback(request *MoveResourceGroupRe
 // MoveResourceGroupRequest is the request struct for api MoveResourceGroup
 type MoveResourceGroupRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
 	ResourceId           string           `position:"Query" name:"ResourceId"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
+	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
 	ResourceType         string           `position:"Query" name:"ResourceType"`
 	NewResourceGroupId   string           `position:"Query" name:"NewResourceGroupId"`
-	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
 }
 
 // MoveResourceGroupResponse is the response struct for api MoveResourceGroup
@@ -96,7 +96,7 @@ func CreateMoveResourceGroupRequest() (request *MoveResourceGroupRequest) {
 	request = &MoveResourceGroupRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "MoveResourceGroup", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "MoveResourceGroup", "Vpc", "openAPI")
 	return
 }
 

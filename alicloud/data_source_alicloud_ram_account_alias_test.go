@@ -3,27 +3,40 @@ package alicloud
 import (
 	"testing"
 
-	"github.com/hashicorp/terraform/helper/resource"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
-func TestAccAlicloudRamAccountAliasDataSource_basic(t *testing.T) {
-	resource.Test(t, resource.TestCase{
-		PreCheck: func() {
-			testAccPreCheck(t)
-		},
-		Providers: testAccProviders,
-		Steps: []resource.TestStep{
-			{
-				Config: testAccCheckAlicloudAccountAliasDataSourceBasic,
-				Check: resource.ComposeTestCheckFunc(
-					testAccCheckAlicloudDataSourceID("data.alicloud_ram_account_aliases.alias"),
-					resource.TestCheckResourceAttr("data.alicloud_ram_account_aliases.alias", "account_alias", "1307087942598154"),
-				),
-			},
-		},
-	})
+func TestAccAlicloudRamAccountAliasDataSource(t *testing.T) {
+	basicConf := dataSourceTestAccConfig{
+		existConfig: testAccAlicloudRamAccountAliasDataSourceConfig(),
+	}
+	preCheck := func() {
+		testAccPreCheckWithRegions(t, true, connectivity.RamNoSkipRegions)
+	}
+	accountAliasCheckInfo.dataSourceTestCheckWithPreCheck(t, -1, preCheck, basicConf)
 }
 
-const testAccCheckAlicloudAccountAliasDataSourceBasic = `
-data "alicloud_ram_account_aliases" "alias" {
+func testAccAlicloudRamAccountAliasDataSourceConfig() string {
+	config := `
+data "alicloud_ram_account_aliases" "default" {
 }`
+	return config
+}
+
+var existRamAccountAliasMapFunc = func(rand int) map[string]string {
+	return map[string]string{
+		"account_alias": CHECKSET,
+	}
+}
+
+var fakeRamAccountAliasMapFunc = func(rand int) map[string]string {
+	return map[string]string{
+		"account_alias": "",
+	}
+}
+
+var accountAliasCheckInfo = dataSourceAttr{
+	resourceId:   "data.alicloud_ram_account_aliases.default",
+	existMapFunc: existRamAccountAliasMapFunc,
+	fakeMapFunc:  fakeRamAccountAliasMapFunc,
+}

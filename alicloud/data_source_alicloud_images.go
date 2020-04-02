@@ -1,14 +1,16 @@
 package alicloud
 
 import (
-	"fmt"
 	"log"
 	"regexp"
 	"sort"
 	"time"
 
-	"github.com/denverdino/aliyungo/ecs"
-	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 func dataSourceAlicloudImages() *schema.Resource {
@@ -20,7 +22,7 @@ func dataSourceAlicloudImages() *schema.Resource {
 				Type:         schema.TypeString,
 				Optional:     true,
 				ForceNew:     true,
-				ValidateFunc: validateNameRegex,
+				ValidateFunc: validation.ValidateRegexp,
 			},
 			"most_recent": {
 				Type:     schema.TypeBool,
@@ -29,14 +31,20 @@ func dataSourceAlicloudImages() *schema.Resource {
 				ForceNew: true,
 			},
 			"owners": {
-				Type:         schema.TypeString,
-				Optional:     true,
-				ForceNew:     true,
-				ValidateFunc: validateImageOwners,
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+				// must contain a valid Image owner, expected ImageOwnerSystem, ImageOwnerSelf, ImageOwnerOthers, ImageOwnerMarketplace, ImageOwnerDefault
+				ValidateFunc: validation.StringInSlice([]string{"system", "self", "others", "marketplace", ""}, false),
 			},
 			"output_file": {
 				Type:     schema.TypeString,
 				Optional: true,
+			},
+			"ids": {
+				Type:     schema.TypeList,
+				Computed: true,
+				Elem:     &schema.Schema{Type: schema.TypeString},
 			},
 			// Computed values.
 			"images": {
@@ -73,6 +81,10 @@ func dataSourceAlicloudImages() *schema.Resource {
 							Computed: true,
 						},
 						"os_name": {
+							Type:     schema.TypeString,
+							Computed: true,
+						},
+						"os_name_en": {
 							Type:     schema.TypeString,
 							Computed: true,
 						},
@@ -161,43 +173,52 @@ func dataSourceAlicloudImages() *schema.Resource {
 
 // dataSourceAlicloudImagesDescriptionRead performs the Alicloud Image lookup.
 func dataSourceAlicloudImagesRead(d *schema.ResourceData, meta interface{}) error {
-	conn := meta.(*AliyunClient).ecsconn
+	client := meta.(*connectivity.AliyunClient)
 
 	nameRegex, nameRegexOk := d.GetOk("name_regex")
 	owners, ownersOk := d.GetOk("owners")
 	mostRecent, mostRecentOk := d.GetOk("most_recent")
 
 	if nameRegexOk == false && ownersOk == false && mostRecentOk == false {
-		return fmt.Errorf("One of name_regex, owners or most_recent must be assigned")
+		return WrapError(Error("One of name_regex, owners or most_recent must be assigned"))
 	}
 
-	params := &ecs.DescribeImagesArgs{
-		RegionId: getRegion(d, meta),
-	}
+	request := ecs.CreateDescribeImagesRequest()
+	request.PageNumber = requests.NewInteger(1)
+	request.PageSize = requests.NewInteger(PageSizeLarge)
 
 	if ownersOk {
-		params.ImageOwnerAlias = ecs.ImageOwnerAlias(owners.(string))
+		request.ImageOwnerAlias = owners.(string)
 	}
 
-	var allImages []ecs.ImageType
+	var allImages []ecs.ImageInDescribeImages
 
 	for {
-		images, paginationResult, err := conn.DescribeImages(params)
+		raw, err := client.WithEcsClient(func(ecsClient *ecs.Client) (interface{}, error) {
+			return ecsClient.DescribeImages(request)
+		})
 		if err != nil {
+			return WrapErrorf(err, DataDefaultErrorMsg, "alicloud_images", request.GetActionName(), AlibabaCloudSdkGoERROR)
+		}
+		response, _ := raw.(*ecs.DescribeImagesResponse)
+		if response == nil || len(response.Images.Image) < 1 {
 			break
 		}
 
-		allImages = append(allImages, images...)
+		allImages = append(allImages, response.Images.Image...)
 
-		pagination := paginationResult.NextPage()
-		if pagination == nil {
+		if len(response.Images.Image) < PageSizeLarge {
 			break
 		}
 
-		params.Pagination = *pagination
+		page, err := getNextpageNumber(request.PageNumber)
+		if err != nil {
+			return WrapError(err)
+		}
+		request.PageNumber = page
 	}
 
-	var filteredImages []ecs.ImageType
+	var filteredImages []ecs.ImageInDescribeImages
 	if nameRegexOk {
 		r := regexp.MustCompile(nameRegex.(string))
 		for _, image := range allImages {
@@ -218,12 +239,8 @@ func dataSourceAlicloudImagesRead(d *schema.ResourceData, meta interface{}) erro
 		filteredImages = allImages[:]
 	}
 
-	var images []ecs.ImageType
-	if len(filteredImages) < 1 {
-		return fmt.Errorf("Your query returned no results. Please change your search criteria and try again.")
-	}
+	var images []ecs.ImageInDescribeImages
 
-	log.Printf("[DEBUG] alicloud_image - multiple results found and `most_recent` is set to: %t", mostRecent.(bool))
 	if len(filteredImages) > 1 && mostRecent.(bool) {
 		// Query returned single result.
 		images = append(images, mostRecentImage(filteredImages))
@@ -231,23 +248,23 @@ func dataSourceAlicloudImagesRead(d *schema.ResourceData, meta interface{}) erro
 		images = filteredImages
 	}
 
-	log.Printf("[DEBUG] alicloud_image - Images found: %#v", images)
 	return imagesDescriptionAttributes(d, images, meta)
 }
 
 // populate the numerous fields that the image description returns.
-func imagesDescriptionAttributes(d *schema.ResourceData, images []ecs.ImageType, meta interface{}) error {
+func imagesDescriptionAttributes(d *schema.ResourceData, images []ecs.ImageInDescribeImages, meta interface{}) error {
 	var ids []string
 	var s []map[string]interface{}
 	for _, image := range images {
 		mapping := map[string]interface{}{
 			"id":                      image.ImageId,
 			"architecture":            image.Architecture,
-			"creation_time":           image.CreationTime.String(),
+			"creation_time":           image.CreationTime,
 			"description":             image.Description,
 			"image_id":                image.ImageId,
 			"image_owner_alias":       image.ImageOwnerAlias,
 			"os_name":                 image.OSName,
+			"os_name_en":              image.OSNameEn,
 			"os_type":                 image.OSType,
 			"name":                    image.ImageName,
 			"platform":                image.Platform,
@@ -268,14 +285,16 @@ func imagesDescriptionAttributes(d *schema.ResourceData, images []ecs.ImageType,
 			"tags":                 imageTagsMappings(d, image.ImageId, meta),
 		}
 
-		log.Printf("[DEBUG] alicloud_image - adding image mapping: %v", mapping)
 		ids = append(ids, image.ImageId)
 		s = append(s, mapping)
 	}
 
 	d.SetId(dataResourceIdHash(ids))
 	if err := d.Set("images", s); err != nil {
-		return err
+		return WrapError(err)
+	}
+	if err := d.Set("ids", ids); err != nil {
+		return WrapError(err)
 	}
 
 	// create a json file in current directory and write data source to it.
@@ -286,7 +305,7 @@ func imagesDescriptionAttributes(d *schema.ResourceData, images []ecs.ImageType,
 }
 
 //Find most recent image
-type imageSort []ecs.ImageType
+type imageSort []ecs.ImageInDescribeImages
 
 func (a imageSort) Len() int {
 	return len(a)
@@ -295,20 +314,20 @@ func (a imageSort) Swap(i, j int) {
 	a[i], a[j] = a[j], a[i]
 }
 func (a imageSort) Less(i, j int) bool {
-	itime, _ := time.Parse(time.RFC3339, a[i].CreationTime.String())
-	jtime, _ := time.Parse(time.RFC3339, a[j].CreationTime.String())
+	itime, _ := time.Parse(time.RFC3339, a[i].CreationTime)
+	jtime, _ := time.Parse(time.RFC3339, a[j].CreationTime)
 	return itime.Unix() < jtime.Unix()
 }
 
 // Returns the most recent Image out of a slice of images.
-func mostRecentImage(images []ecs.ImageType) ecs.ImageType {
+func mostRecentImage(images []ecs.ImageInDescribeImages) ecs.ImageInDescribeImages {
 	sortedImages := images
 	sort.Sort(imageSort(sortedImages))
 	return sortedImages[len(sortedImages)-1]
 }
 
 // Returns a set of disk device mappings.
-func imageDiskDeviceMappings(m []ecs.DiskDeviceMapping) []map[string]interface{} {
+func imageDiskDeviceMappings(m []ecs.DiskDeviceMappingInDescribeImages) []map[string]interface{} {
 	var s []map[string]interface{}
 
 	for _, v := range m {
@@ -318,7 +337,6 @@ func imageDiskDeviceMappings(m []ecs.DiskDeviceMapping) []map[string]interface{}
 			"snapshot_id": v.SnapshotId,
 		}
 
-		log.Printf("[DEBUG] alicloud_image - adding disk device mapping: %v", mapping)
 		s = append(s, mapping)
 	}
 
@@ -327,20 +345,14 @@ func imageDiskDeviceMappings(m []ecs.DiskDeviceMapping) []map[string]interface{}
 
 //Returns a mapping of image tags
 func imageTagsMappings(d *schema.ResourceData, imageId string, meta interface{}) map[string]string {
-	client := meta.(*AliyunClient)
-	conn := client.ecsconn
+	client := meta.(*connectivity.AliyunClient)
+	ecsService := EcsService{client}
 
-	tags, _, err := conn.DescribeTags(&ecs.DescribeTagsArgs{
-		RegionId:     getRegion(d, meta),
-		ResourceType: ecs.TagResourceImage,
-		ResourceId:   imageId,
-	})
+	tags, err := ecsService.DescribeTags(imageId, TagResourceImage)
 
 	if err != nil {
-		log.Printf("[ERROR] DescribeTags for image got error: %#v", err)
 		return nil
 	}
 
-	log.Printf("[DEBUG] DescribeTags for image : %v", tags)
 	return tagsToMap(tags)
 }

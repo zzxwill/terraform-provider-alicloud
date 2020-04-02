@@ -2,34 +2,63 @@ package alicloud
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/rds"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
-func TestAccAlicloudDBDatabase_basic(t *testing.T) {
-	var database rds.Database
+func TestAccAlicloudDBDatabaseUpdate(t *testing.T) {
+	var database *rds.DatabaseInDescribeDatabases
+	resourceId := "alicloud_db_database.default"
 
+	var dbDatabaseBasicMap = map[string]string{
+		"instance_id":   CHECKSET,
+		"name":          "tftestdatabase",
+		"character_set": "utf8",
+		"description":   "",
+	}
+
+	ra := resourceAttrInit(resourceId, dbDatabaseBasicMap)
+	rc := resourceCheckInitWithDescribeMethod(resourceId, &database, func() interface{} {
+		return &RdsService{testAccProvider.Meta().(*connectivity.AliyunClient)}
+	}, "DescribeDBDatabase")
+	rac := resourceAttrCheckInit(rc, ra)
+	testAccCheck := rac.resourceAttrMapUpdateSet()
+	name := "tf-testAccDBdatabase_basic"
+	testAccConfig := resourceTestAccConfigFunc(resourceId, name, resourceDBDatabaseConfigDependence)
 	resource.Test(t, resource.TestCase{
 		PreCheck: func() {
 			testAccPreCheck(t)
 		},
 
 		// module name
-		IDRefreshName: "alicloud_db_database.db",
+		IDRefreshName: resourceId,
 
 		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckDBDatabaseDestroy,
+		CheckDestroy: rac.checkResourceDestroy(),
 		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccDBDatabase_basic,
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"instance_id": "${alicloud_db_instance.instance.id}",
+					"name":        "tftestdatabase",
+				}),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckDBDatabaseExists(
-						"alicloud_db_database.db", &database),
-					resource.TestCheckResourceAttr("alicloud_db_database.db", "character_set", "utf8"),
+					testAccCheck(nil),
+				),
+			},
+			{
+				ResourceName:      resourceId,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"description": "from terraform",
+				}),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheck(map[string]string{"description": "from terraform"}),
 				),
 			},
 		},
@@ -37,89 +66,34 @@ func TestAccAlicloudDBDatabase_basic(t *testing.T) {
 
 }
 
-func testAccCheckDBDatabaseExists(n string, d *rds.Database) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[n]
-		if !ok {
-			return fmt.Errorf("Not found: %s", n)
-		}
-
-		if rs.Primary.ID == "" {
-			return fmt.Errorf("No DB ID is set")
-		}
-
-		client := testAccProvider.Meta().(*AliyunClient)
-		parts := strings.Split(rs.Primary.ID, COLON_SEPARATED)
-		db, err := client.DescribeDatabaseByName(parts[0], parts[1])
-
-		if err != nil {
-			return err
-		}
-
-		if db == nil {
-			return fmt.Errorf("DB is not found in the instance %s.", parts[0])
-		}
-
-		*d = *db
-		return nil
-	}
-}
-
-func testAccCheckDBDatabaseDestroy(s *terraform.State) error {
-	client := testAccProvider.Meta().(*AliyunClient)
-
-	for _, rs := range s.RootModule().Resources {
-		if rs.Type != "alicloud_db_database" {
-			continue
-		}
-
-		parts := strings.Split(rs.Primary.ID, COLON_SEPARATED)
-
-		db, err := client.DescribeDatabaseByName(parts[0], parts[1])
-
-		// Verify the error is what we want
-		if err != nil {
-			if NotFoundDBInstance(err) || IsExceptedError(err, InvalidDBNameNotFound) {
-				return nil
-			}
-			return err
-		}
-
-		if db != nil {
-			return fmt.Errorf("Error database %s is still existing.", parts[1])
-		}
+func resourceDBDatabaseConfigDependence(name string) string {
+	return fmt.Sprintf(`
+	%s
+	variable "creation" {
+		default = "Rds"
 	}
 
-	return nil
-}
+	variable "name" {
+		default = "%s"
+	}
 
-const testAccDBDatabase_basic = `
-data "alicloud_zones" "default" {
-	"available_resource_creation"= "Rds"
-}
+	data "alicloud_db_instance_engines" "default" {
+  		instance_charge_type = "PostPaid"
+  		engine               = "MySQL"
+  		engine_version       = "5.6"
+	}
 
-resource "alicloud_vpc" "foo" {
-	name = "tf_test_foo"
-	cidr_block = "172.16.0.0/12"
-}
+	data "alicloud_db_instance_classes" "default" {
+ 	 	engine = "${data.alicloud_db_instance_engines.default.instance_engines.0.engine}"
+		engine_version = "${data.alicloud_db_instance_engines.default.instance_engines.0.engine_version}"
+	}
 
-resource "alicloud_vswitch" "foo" {
- 	vpc_id = "${alicloud_vpc.foo.id}"
- 	cidr_block = "172.16.0.0/21"
- 	availability_zone = "${data.alicloud_zones.default.zones.0.id}"
+	resource "alicloud_db_instance" "instance" {
+		engine = "${data.alicloud_db_instance_engines.default.instance_engines.0.engine}"
+		engine_version = "${data.alicloud_db_instance_engines.default.instance_engines.0.engine_version}"
+		instance_type = "${data.alicloud_db_instance_classes.default.instance_classes.0.instance_class}"
+		instance_storage = "${data.alicloud_db_instance_classes.default.instance_classes.0.storage_range.min}"
+		vswitch_id = "${alicloud_vswitch.default.id}"
+		instance_name = "${var.name}"
+	}`, RdsCommonTestCase, name)
 }
-
-resource "alicloud_db_instance" "instance" {
-	engine = "MySQL"
-	engine_version = "5.6"
-	instance_type = "rds.mysql.t1.small"
-	instance_storage = "10"
-  	vswitch_id = "${alicloud_vswitch.foo.id}"
-}
-
-resource "alicloud_db_database" "db" {
-  instance_id = "${alicloud_db_instance.instance.id}"
-  name = "tf_db"
-  description = "from terraform"
-}
-`

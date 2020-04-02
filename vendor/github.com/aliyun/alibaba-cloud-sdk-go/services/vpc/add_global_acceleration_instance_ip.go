@@ -76,11 +76,11 @@ func (client *Client) AddGlobalAccelerationInstanceIpWithCallback(request *AddGl
 // AddGlobalAccelerationInstanceIpRequest is the request struct for api AddGlobalAccelerationInstanceIp
 type AddGlobalAccelerationInstanceIpRequest struct {
 	*requests.RpcRequest
-	OwnerId                      requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount         string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId              requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	OwnerAccount                 string           `position:"Query" name:"OwnerAccount"`
 	GlobalAccelerationInstanceId string           `position:"Query" name:"GlobalAccelerationInstanceId"`
+	ResourceOwnerAccount         string           `position:"Query" name:"ResourceOwnerAccount"`
+	OwnerAccount                 string           `position:"Query" name:"OwnerAccount"`
+	OwnerId                      requests.Integer `position:"Query" name:"OwnerId"`
 	IpInstanceId                 string           `position:"Query" name:"IpInstanceId"`
 }
 
@@ -95,7 +95,7 @@ func CreateAddGlobalAccelerationInstanceIpRequest() (request *AddGlobalAccelerat
 	request = &AddGlobalAccelerationInstanceIpRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "AddGlobalAccelerationInstanceIp", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "AddGlobalAccelerationInstanceIp", "Vpc", "openAPI")
 	return
 }
 

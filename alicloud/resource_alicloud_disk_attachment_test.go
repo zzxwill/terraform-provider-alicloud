@@ -3,16 +3,25 @@ package alicloud
 import (
 	"fmt"
 	"testing"
-	"time"
 
-	"github.com/denverdino/aliyungo/ecs"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/terraform"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 func TestAccAlicloudDiskAttachment(t *testing.T) {
-	var i ecs.InstanceAttributesType
-	var v ecs.DiskItemType
+	var i ecs.InstanceInDescribeInstances
+	var v ecs.DiskInDescribeDisks
+	var attachment ecs.DiskInDescribeDisks
+	serverFunc := func() interface{} {
+		return &EcsService{testAccProvider.Meta().(*connectivity.AliyunClient)}
+	}
+	diskRc := resourceCheckInit("alicloud_disk.default", &v, serverFunc)
+
+	instanceRc := resourceCheckInit("alicloud_instance.default", &i, serverFunc)
+
+	attachmentRc := resourceCheckInit("alicloud_disk_attachment.default", &attachment, serverFunc)
 
 	resource.Test(t, resource.TestCase{
 		PreCheck: func() {
@@ -20,19 +29,30 @@ func TestAccAlicloudDiskAttachment(t *testing.T) {
 		},
 
 		// module name
-		IDRefreshName: "alicloud_disk_attachment.disk-att",
+		IDRefreshName: "alicloud_disk_attachment.default",
 		Providers:     testAccProviders,
 		CheckDestroy:  testAccCheckDiskAttachmentDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccDiskAttachmentConfig,
+			{
+				Config: testAccDiskAttachmentConfig(),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckInstanceExists(
-						"alicloud_instance.instance", &i),
-					testAccCheckDiskExists(
-						"alicloud_disk.disk", &v),
-					testAccCheckDiskAttachmentExists(
-						"alicloud_disk_attachment.disk-att", &i, &v),
+					diskRc.checkResourceExists(),
+					instanceRc.checkResourceExists(),
+					attachmentRc.checkResourceExists(),
+					resource.TestCheckResourceAttrSet(
+						"alicloud_disk_attachment.default", "device_name"),
+				),
+			},
+			{
+				Config: testAccDiskAttachmentConfigResize(),
+				Check: resource.ComposeTestCheckFunc(
+					diskRc.checkResourceExists(),
+					instanceRc.checkResourceExists(),
+					attachmentRc.checkResourceExists(),
+					resource.TestCheckResourceAttrSet(
+						"alicloud_disk_attachment.default", "device_name"),
+					resource.TestCheckResourceAttr(
+						"alicloud_disk.default", "size", "70"),
 				),
 			},
 		},
@@ -41,97 +61,41 @@ func TestAccAlicloudDiskAttachment(t *testing.T) {
 }
 
 func TestAccAlicloudDiskMultiAttachment(t *testing.T) {
-	var i ecs.InstanceAttributesType
-	var v ecs.DiskItemType
-
-	resource.Test(t, resource.TestCase{
-		PreCheck: func() {
-			testAccPreCheck(t)
-		},
-
-		// module name
-		IDRefreshName: "alicloud_disk_attachment.disks-attach.0",
-		Providers:     testAccProviders,
-		CheckDestroy:  testAccCheckDiskAttachmentDestroy,
-		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccMultiDiskAttachmentConfig,
-				Check: resource.ComposeTestCheckFunc(
-					testAccCheckInstanceExists(
-						"alicloud_instance.instance", &i),
-					testAccCheckDiskExists(
-						"alicloud_disk.disks.0", &v),
-					testAccCheckDiskAttachmentExists(
-						"alicloud_disk_attachment.disks-attach.0", &i, &v),
-				),
-			},
-		},
-	})
-	resource.Test(t, resource.TestCase{
-		PreCheck: func() {
-			testAccPreCheck(t)
-		},
-
-		// module name
-		IDRefreshName: "alicloud_disk_attachment.disks-attach.1",
-		Providers:     testAccProviders,
-		CheckDestroy:  testAccCheckDiskAttachmentDestroy,
-		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccMultiDiskAttachmentConfig,
-				Check: resource.ComposeTestCheckFunc(
-					testAccCheckInstanceExists(
-						"alicloud_instance.instance", &i),
-					testAccCheckDiskExists(
-						"alicloud_disk.disks.1", &v),
-					testAccCheckDiskAttachmentExists(
-						"alicloud_disk_attachment.disks-attach.1", &i, &v),
-				),
-			},
-		},
-	})
-
-}
-
-func testAccCheckDiskAttachmentExists(n string, instance *ecs.InstanceAttributesType, disk *ecs.DiskItemType) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[n]
-		if !ok {
-			return fmt.Errorf("Not found: %s", n)
-		}
-
-		if rs.Primary.ID == "" {
-			return fmt.Errorf("No Disk ID is set")
-		}
-
-		client := testAccProvider.Meta().(*AliyunClient)
-		conn := client.ecsconn
-
-		request := &ecs.DescribeDisksArgs{
-			RegionId: client.Region,
-			DiskIds:  []string{rs.Primary.Attributes["disk_id"]},
-		}
-
-		return resource.Retry(3*time.Minute, func() *resource.RetryError {
-			response, _, err := conn.DescribeDisks(request)
-			if response != nil {
-				for _, d := range response {
-					if d.Status != ecs.DiskStatusInUse {
-						return resource.RetryableError(fmt.Errorf("Disk is in attaching - trying again while it attaches"))
-					} else if d.InstanceId == instance.InstanceId {
-						// pass
-						*disk = d
-						return nil
-					}
-				}
-			}
-			if err != nil {
-				return resource.NonRetryableError(err)
-			}
-
-			return resource.NonRetryableError(fmt.Errorf("Error finding instance/disk"))
-		})
+	var i ecs.InstanceInDescribeInstances
+	var v ecs.DiskInDescribeDisks
+	var attachment ecs.DiskInDescribeDisks
+	serverFunc := func() interface{} {
+		return &EcsService{testAccProvider.Meta().(*connectivity.AliyunClient)}
 	}
+	diskRc := resourceCheckInit("alicloud_disk.default.1", &v, serverFunc)
+
+	instanceRc := resourceCheckInit("alicloud_instance.default", &i, serverFunc)
+
+	attachmentRc := resourceCheckInit("alicloud_disk_attachment.default.1", &attachment, serverFunc)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck: func() {
+			testAccPreCheck(t)
+		},
+
+		// module name
+		IDRefreshName: "alicloud_disk_attachment.default.1",
+		Providers:     testAccProviders,
+		CheckDestroy:  testAccCheckDiskAttachmentDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccMultiDiskAttachmentConfig(EcsInstanceCommonNoZonesTestCase),
+				Check: resource.ComposeTestCheckFunc(
+					diskRc.checkResourceExists(),
+					instanceRc.checkResourceExists(),
+					attachmentRc.checkResourceExists(),
+					resource.TestCheckResourceAttrSet(
+						"alicloud_disk_attachment.default.1", "device_name"),
+				),
+			},
+		},
+	})
+
 }
 
 func testAccCheckDiskAttachmentDestroy(s *terraform.State) error {
@@ -141,101 +105,198 @@ func testAccCheckDiskAttachmentDestroy(s *terraform.State) error {
 			continue
 		}
 		// Try to find the Disk
-		client := testAccProvider.Meta().(*AliyunClient)
-		conn := client.ecsconn
-
-		request := &ecs.DescribeDisksArgs{
-			RegionId: client.Region,
-			DiskIds:  []string{rs.Primary.ID},
-		}
-
-		response, _, err := conn.DescribeDisks(request)
-
-		for _, disk := range response {
-			if disk.Status != ecs.DiskStatusAvailable {
-				return fmt.Errorf("Error ECS Disk Attachment still exist")
-			}
-		}
+		client := testAccProvider.Meta().(*connectivity.AliyunClient)
+		ecsService := EcsService{client}
+		_, err := ecsService.DescribeDiskAttachment(rs.Primary.ID)
 
 		if err != nil {
-			// Verify the error is what we want
-			return err
+			if NotFoundError(err) {
+				continue
+			}
+			return WrapError(err)
 		}
 	}
 
 	return nil
 }
 
-const testAccDiskAttachmentConfig = `
-resource "alicloud_disk" "disk" {
-  availability_zone = "cn-beijing-a"
-  size = "50"
+func testAccDiskAttachmentConfig() string {
+	return fmt.Sprintf(`
+    data "alicloud_instance_types" "default" {
+      cpu_core_count    = 2
+      memory_size       = 4
+    }
+    data "alicloud_images" "default" {
+	  # test for windows service
+      name_regex  = "^win*"
 
-  tags {
-    Name = "TerraformTest-disk"
-  }
+      most_recent = true
+      owners      = "system"
+    }
+    resource "alicloud_vpc" "default" {
+      name       = "${var.name}"
+      cidr_block = "172.16.0.0/16"
+    }
+    resource "alicloud_vswitch" "default" {
+      vpc_id            = "${alicloud_vpc.default.id}"
+      cidr_block        = "172.16.0.0/24"
+      availability_zone = "${data.alicloud_instance_types.default.instance_types.0.availability_zones.0}"
+      name              = "${var.name}"
+    }
+    resource "alicloud_security_group" "default" {
+      name   = "${var.name}"
+      vpc_id = "${alicloud_vpc.default.id}"
+    }
+    resource "alicloud_security_group_rule" "default" {
+      	type = "ingress"
+      	ip_protocol = "tcp"
+      	nic_type = "intranet"
+      	policy = "accept"
+      	port_range = "22/22"
+      	priority = 1
+      	security_group_id = "${alicloud_security_group.default.id}"
+      	cidr_ip = "172.16.0.0/24"
+    }	
+
+	variable "name" {
+		default = "tf-testAccEcsDiskAttachmentConfig"
+	}
+
+	resource "alicloud_disk" "default" {
+	  availability_zone = "${data.alicloud_instance_types.default.instance_types.0.availability_zones.0}"
+	  size = "50"
+	  name = "${var.name}"
+	  category = "cloud_efficiency"
+
+	  tags = {
+	    Name = "TerraformTest-disk"
+	  }
+	}
+
+	resource "alicloud_instance" "default" {
+		image_id = "${data.alicloud_images.default.images.0.id}"
+		availability_zone = "${data.alicloud_instance_types.default.instance_types.0.availability_zones.0}"
+		system_disk_category = "cloud_ssd"
+		system_disk_size = 40
+		instance_type = "${data.alicloud_instance_types.default.instance_types.0.id}"
+		security_groups = ["${alicloud_security_group.default.id}"]
+		instance_name = "${var.name}"
+		vswitch_id = "${alicloud_vswitch.default.id}"
+	}
+
+	resource "alicloud_disk_attachment" "default" {
+	  disk_id = "${alicloud_disk.default.id}"
+	  instance_id = "${alicloud_instance.default.id}"
+	}
+	`)
 }
+func testAccDiskAttachmentConfigResize() string {
+	return fmt.Sprintf(`
+    data "alicloud_instance_types" "default" {
+      cpu_core_count    = 2
+      memory_size       = 4
+    }
+    data "alicloud_images" "default" {
+	  # test for windows service
+      name_regex  = "^win*"
 
-resource "alicloud_instance" "instance" {
-  image_id = "ubuntu_140405_64_40G_cloudinit_20161115.vhd"
-  instance_type = "ecs.n4.small"
-  availability_zone = "cn-beijing-a"
-  security_groups = ["${alicloud_security_group.group.id}"]
-  instance_name = "hello"
-  internet_charge_type = "PayByBandwidth"
+      most_recent = true
+      owners      = "system"
+    }
+    resource "alicloud_vpc" "default" {
+      name       = "${var.name}"
+      cidr_block = "172.16.0.0/16"
+    }
+    resource "alicloud_vswitch" "default" {
+      vpc_id            = "${alicloud_vpc.default.id}"
+      cidr_block        = "172.16.0.0/24"
+      availability_zone = "${data.alicloud_instance_types.default.instance_types.0.availability_zones.0}"
+      name              = "${var.name}"
+    }
+    resource "alicloud_security_group" "default" {
+      name   = "${var.name}"
+      vpc_id = "${alicloud_vpc.default.id}"
+    }
+    resource "alicloud_security_group_rule" "default" {
+      	type = "ingress"
+      	ip_protocol = "tcp"
+      	nic_type = "intranet"
+      	policy = "accept"
+      	port_range = "22/22"
+      	priority = 1
+      	security_group_id = "${alicloud_security_group.default.id}"
+      	cidr_ip = "172.16.0.0/24"
+    }	
 
-  tags {
-    Name = "TerraformTest-instance"
-  }
+	variable "name" {
+		default = "tf-testAccEcsDiskAttachmentConfig"
+	}
+
+	resource "alicloud_disk" "default" {
+	  availability_zone = "${data.alicloud_instance_types.default.instance_types.0.availability_zones.0}"
+	  size = "70"
+	  name = "${var.name}"
+	  category = "cloud_efficiency"
+
+	  tags = {
+	    Name = "TerraformTest-disk"
+	  }
+	}
+
+	resource "alicloud_instance" "default" {
+		image_id = "${data.alicloud_images.default.images.0.id}"
+		availability_zone = "${data.alicloud_instance_types.default.instance_types.0.availability_zones.0}"
+		system_disk_category = "cloud_ssd"
+		system_disk_size = 40
+		instance_type = "${data.alicloud_instance_types.default.instance_types.0.id}"
+		security_groups = ["${alicloud_security_group.default.id}"]
+		instance_name = "${var.name}"
+		vswitch_id = "${alicloud_vswitch.default.id}"
+	}
+
+	resource "alicloud_disk_attachment" "default" {
+	  disk_id = "${alicloud_disk.default.id}"
+	  instance_id = "${alicloud_instance.default.id}"
+	}
+	`)
 }
+func testAccMultiDiskAttachmentConfig(common string) string {
+	return fmt.Sprintf(`
+	%s
+	variable "name" {
+		default = "tf-testAccEcsDiskAttachmentConfig"
+	}
 
-resource "alicloud_disk_attachment" "disk-att" {
-  disk_id = "${alicloud_disk.disk.id}"
-  instance_id = "${alicloud_instance.instance.id}"
+	variable "number" {
+		default = "2"
+	}
+
+	resource "alicloud_disk" "default" {
+		name = "${var.name}-${count.index}"
+		count = "${var.number}"
+		availability_zone = "${data.alicloud_instance_types.default.instance_types.0.availability_zones.0}"
+		size = "50"
+
+		tags = {
+			Name = "TerraformTest-disk-${count.index}"
+		}
+	}
+
+	resource "alicloud_instance" "default" {
+		image_id = "${data.alicloud_images.default.images.0.id}"
+		availability_zone = "${data.alicloud_instance_types.default.instance_types.0.availability_zones.0}"
+		system_disk_category = "cloud_ssd"
+		system_disk_size = 40
+		instance_type = "${data.alicloud_instance_types.default.instance_types.0.id}"
+		security_groups = ["${alicloud_security_group.default.id}"]
+		instance_name = "${var.name}"
+		vswitch_id = "${alicloud_vswitch.default.id}"
+	}
+
+	resource "alicloud_disk_attachment" "default" {
+		count = "${var.number}"
+		disk_id     = "${element(alicloud_disk.default.*.id, count.index)}"
+		instance_id = "${alicloud_instance.default.id}"
+	}
+	`, common)
 }
-
-resource "alicloud_security_group" "group" {
-  name = "terraform-test-group"
-  description = "New security group"
-}
-`
-const testAccMultiDiskAttachmentConfig = `
-
-variable "count" {
-  default = "2"
-}
-
-resource "alicloud_disk" "disks" {
-  count = "${var.count}"
-  availability_zone = "cn-beijing-a"
-  size = "50"
-
-  tags {
-    Name = "TerraformTest-disk-${count.index}"
-  }
-}
-
-resource "alicloud_instance" "instance" {
-  image_id = "ubuntu_140405_64_40G_cloudinit_20161115.vhd"
-  instance_type = "ecs.n4.small"
-  availability_zone = "cn-beijing-a"
-  security_groups = ["${alicloud_security_group.group.id}"]
-  instance_name = "hello"
-  internet_charge_type = "PayByBandwidth"
-
-  tags {
-    Name = "TerraformTest-instance"
-  }
-}
-
-resource "alicloud_disk_attachment" "disks-attach" {
-  count = "${var.count}"
-  disk_id     = "${element(alicloud_disk.disks.*.id, count.index)}"
-  instance_id = "${alicloud_instance.instance.id}"
-}
-
-resource "alicloud_security_group" "group" {
-  name = "terraform-test-group"
-  description = "New security group"
-}
-`

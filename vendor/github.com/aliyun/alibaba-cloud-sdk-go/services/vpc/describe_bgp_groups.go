@@ -76,15 +76,15 @@ func (client *Client) DescribeBgpGroupsWithCallback(request *DescribeBgpGroupsRe
 // DescribeBgpGroupsRequest is the request struct for api DescribeBgpGroups
 type DescribeBgpGroupsRequest struct {
 	*requests.RpcRequest
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	RouterId             string           `position:"Query" name:"RouterId"`
 	BgpGroupId           string           `position:"Query" name:"BgpGroupId"`
-	IsDefault            requests.Boolean `position:"Query" name:"IsDefault"`
 	PageNumber           requests.Integer `position:"Query" name:"PageNumber"`
 	PageSize             requests.Integer `position:"Query" name:"PageSize"`
+	IsDefault            requests.Boolean `position:"Query" name:"IsDefault"`
+	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
+	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
+	RouterId             string           `position:"Query" name:"RouterId"`
 }
 
 // DescribeBgpGroupsResponse is the response struct for api DescribeBgpGroups
@@ -102,7 +102,7 @@ func CreateDescribeBgpGroupsRequest() (request *DescribeBgpGroupsRequest) {
 	request = &DescribeBgpGroupsRequest{
 		RpcRequest: &requests.RpcRequest{},
 	}
-	request.InitWithApiInfo("Vpc", "2016-04-28", "DescribeBgpGroups", "vpc", "openAPI")
+	request.InitWithApiInfo("Vpc", "2016-04-28", "DescribeBgpGroups", "Vpc", "openAPI")
 	return
 }
 

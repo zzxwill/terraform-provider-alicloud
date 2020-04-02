@@ -6,25 +6,24 @@ import (
 	"testing"
 
 	"github.com/denverdino/aliyungo/cs"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/terraform"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
-func TestAccAlicloudCSApplication_swarm(t *testing.T) {
+func SkipTestAccAlicloudCSApplication_swarm(t *testing.T) {
 	var basic, env cs.GetProjectResponse
 	var swarm cs.ClusterType
 
 	resource.Test(t, resource.TestCase{
-		PreCheck: func() {
-			testAccPreCheck(t)
-		},
+		PreCheck: func() { testAccPreCheckWithRegions(t, true, connectivity.SwarmSupportedRegions) },
 
 		IDRefreshName: "alicloud_cs_swarm.cs_vpc",
 
 		Providers:    testAccProviders,
 		CheckDestroy: testAccCheckContainerApplicationDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
+			{
 				Config: testAccCSApplication_basic(testJavaTemplate, testMultiTemplate),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckContainerClusterExists("alicloud_cs_swarm.cs_vpc", &swarm),
@@ -43,21 +42,19 @@ func TestAccAlicloudCSApplication_swarm(t *testing.T) {
 	})
 }
 
-func TestAccAlicloudCSApplication_update(t *testing.T) {
+func SkipTestAccAlicloudCSApplication_update(t *testing.T) {
 	var basic cs.GetProjectResponse
 	var swarm cs.ClusterType
 
 	resource.Test(t, resource.TestCase{
-		PreCheck: func() {
-			testAccPreCheck(t)
-		},
+		PreCheck: func() { testAccPreCheckWithRegions(t, true, connectivity.SwarmSupportedRegions) },
 
 		IDRefreshName: "alicloud_cs_swarm.cs_vpc",
 
 		Providers:    testAccProviders,
 		CheckDestroy: testAccCheckContainerApplicationDestroy,
 		Steps: []resource.TestStep{
-			resource.TestStep{
+			{
 				Config: testAccCSApplication_updateBefore(testWebTemplate),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckContainerClusterExists("alicloud_cs_swarm.cs_vpc", &swarm),
@@ -67,7 +64,7 @@ func TestAccAlicloudCSApplication_update(t *testing.T) {
 				),
 			},
 
-			resource.TestStep{
+			{
 				Config: testAccCSApplication_updateBlueGreen(testJavaTemplate),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckContainerClusterExists("alicloud_cs_swarm.cs_vpc", &swarm),
@@ -76,7 +73,7 @@ func TestAccAlicloudCSApplication_update(t *testing.T) {
 				),
 			},
 
-			resource.TestStep{
+			{
 				Config: testAccCSApplication_updateConfirm(testJavaTemplate),
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckContainerClusterExists("alicloud_cs_swarm.cs_vpc", &swarm),
@@ -100,8 +97,9 @@ func testAccCheckContainerApplicationExists(n string, d *cs.GetProjectResponse) 
 			return fmt.Errorf("No Container cluster ID is set")
 		}
 		parts := strings.Split(cluster.Primary.ID, COLON_SEPARATED)
-		client := testAccProvider.Meta().(*AliyunClient)
-		app, err := client.DescribeContainerApplication(parts[0], parts[1])
+		client := testAccProvider.Meta().(*connectivity.AliyunClient)
+		csService := CsService{client}
+		app, err := csService.DescribeContainerApplication(parts[0], parts[1])
 
 		if err != nil {
 			return err
@@ -117,7 +115,8 @@ func testAccCheckContainerApplicationExists(n string, d *cs.GetProjectResponse) 
 }
 
 func testAccCheckContainerApplicationDestroy(s *terraform.State) error {
-	client := testAccProvider.Meta().(*AliyunClient)
+	client := testAccProvider.Meta().(*connectivity.AliyunClient)
+	csService := CsService{client}
 
 	for _, rs := range s.RootModule().Resources {
 		if rs.Type != "alicloud_cs_application" {
@@ -125,14 +124,11 @@ func testAccCheckContainerApplicationDestroy(s *terraform.State) error {
 		}
 
 		parts := strings.Split(rs.Primary.ID, COLON_SEPARATED)
-		app, err := client.DescribeContainerApplication(parts[0], parts[1])
+		app, err := csService.DescribeContainerApplication(parts[0], parts[1])
 
 		if err != nil {
-			if NotFoundError(err) ||
-				IsExceptedError(err, ApplicationNotFound) ||
-				IsExceptedError(err, ApplicationErrorIgnore) ||
-				IsExceptedError(err, AliyunGoClientFailure) {
-				return nil
+			if NotFoundError(err) || IsExpectedErrors(err, []string{"Not Found", "Unable to reach primary cluster manager", AliyunGoClientFailure}) {
+				continue
 			}
 			return err
 		}
@@ -147,6 +143,9 @@ func testAccCheckContainerApplicationDestroy(s *terraform.State) error {
 
 func testAccCSApplication_basic(basic, env string) string {
 	return fmt.Sprintf(`
+variable "name" {
+	default = "tf-testAccCSApplication-basic"
+}
 data "alicloud_images" main {
   most_recent = true
   name_regex = "^centos_6\\w{1,5}[64].*"
@@ -155,9 +154,14 @@ data "alicloud_images" main {
 data "alicloud_zones" main {
   available_resource_creation = "VSwitch"
 }
+data "alicloud_instance_types" "default" {
+ 	availability_zone = "${data.alicloud_zones.main.zones.0.id}"
+	cpu_core_count = 1
+	memory_size = 2
+}
 
 resource "alicloud_vpc" "foo" {
-  name = "tf-test-swarm-app"
+  name = "${var.name}"
   cidr_block = "10.1.0.0/21"
 }
 
@@ -165,12 +169,13 @@ resource "alicloud_vswitch" "foo" {
   vpc_id = "${alicloud_vpc.foo.id}"
   cidr_block = "10.1.1.0/24"
   availability_zone = "${data.alicloud_zones.main.zones.0.id}"
+  name = "${var.name}"
 }
 
 resource "alicloud_cs_swarm" "cs_vpc" {
-  password = "Just$test"
-  instance_type = "ecs.n4.small"
-  name_prefix = "tf-test-swarm-app"
+  password = "Yourpassword1234"
+  instance_type = "${data.alicloud_instance_types.default.instance_types.0.id}"
+  name_prefix = "${var.name}"
   node_number = 2
   disk_category = "cloud_efficiency"
   disk_size = 20
@@ -181,7 +186,7 @@ resource "alicloud_cs_swarm" "cs_vpc" {
 
 resource "alicloud_cs_application" "basic" {
   cluster_name = "${alicloud_cs_swarm.cs_vpc.name}"
-  name = "tf-test-swarm-app-basic"
+  name = "${var.name}-app-basic"
   version = "1.0"
   description = "from tf creation"
   template = <<DEFINITION
@@ -192,7 +197,7 @@ resource "alicloud_cs_application" "basic" {
 
 resource "alicloud_cs_application" "env" {
   cluster_name = "${alicloud_cs_swarm.cs_vpc.name}"
-  name = "tf-test-swarm-app-env"
+  name = "${var.name}-app-env"
   version = "1.0"
   template = <<DEFINITION
   %s
@@ -201,7 +206,7 @@ resource "alicloud_cs_application" "env" {
   latest_image = "true"
   environment = {
 	USER = "swarm"
-	PASSWORD = "Test12345"
+	PASSWORD = "Yourpassword1234"
   }
 }
 `, basic, env)
@@ -209,6 +214,9 @@ resource "alicloud_cs_application" "env" {
 
 func testAccCSApplication_updateBefore(web string) string {
 	return fmt.Sprintf(`
+variable "name" {
+	default = "tf-testAccCSApplication-update"
+}
 data "alicloud_images" main {
   most_recent = true
   name_regex = "^centos_6\\w{1,5}[64].*"
@@ -217,9 +225,14 @@ data "alicloud_images" main {
 data "alicloud_zones" main {
   available_resource_creation = "VSwitch"
 }
+data "alicloud_instance_types" "default" {
+ 	availability_zone = "${data.alicloud_zones.main.zones.0.id}"
+	cpu_core_count = 1
+	memory_size = 2
+}
 
 resource "alicloud_vpc" "foo" {
-  name = "tf-test-swarm-app"
+  name = "${var.name}"
   cidr_block = "10.1.0.0/21"
 }
 
@@ -227,12 +240,13 @@ resource "alicloud_vswitch" "foo" {
   vpc_id = "${alicloud_vpc.foo.id}"
   cidr_block = "10.1.1.0/24"
   availability_zone = "${data.alicloud_zones.main.zones.0.id}"
+  name = "${var.name}"
 }
 
 resource "alicloud_cs_swarm" "cs_vpc" {
-  password = "Just$test"
-  instance_type = "ecs.n4.small"
-  name_prefix = "tf-test-swarm-app"
+  password = "Yourpassword1234"
+  instance_type = "${data.alicloud_instance_types.default.instance_types.0.id}"
+  name_prefix = "${var.name}"
   node_number = 2
   disk_category = "cloud_efficiency"
   disk_size = 20
@@ -243,7 +257,7 @@ resource "alicloud_cs_swarm" "cs_vpc" {
 
 resource "alicloud_cs_application" "basic" {
   cluster_name = "${alicloud_cs_swarm.cs_vpc.name}"
-  name = "tf-test-swarm-app-basic"
+  name = "${var.name}"
   version = "1.0"
   description = "from tf creation"
   template = <<DEFINITION
@@ -256,17 +270,25 @@ resource "alicloud_cs_application" "basic" {
 
 func testAccCSApplication_updateBlueGreen(java string) string {
 	return fmt.Sprintf(`
+variable "name" {
+	default = "tf-testAccCSApplication-update"
+}
 data "alicloud_images" main {
-  most_recent = true
-  name_regex = "^centos_6\\w{1,5}[64].*"
+	most_recent = true
+	name_regex = "^centos_6\\w{1,5}[64].*"
 }
 
 data "alicloud_zones" main {
-  available_resource_creation = "VSwitch"
+  	available_resource_creation = "VSwitch"
+}
+data "alicloud_instance_types" "default" {
+ 	availability_zone = "${data.alicloud_zones.main.zones.0.id}"
+	cpu_core_count = 1
+	memory_size = 2
 }
 
 resource "alicloud_vpc" "foo" {
-  name = "tf-test-swarm-app"
+  name = "${var.name}"
   cidr_block = "10.1.0.0/21"
 }
 
@@ -274,12 +296,13 @@ resource "alicloud_vswitch" "foo" {
   vpc_id = "${alicloud_vpc.foo.id}"
   cidr_block = "10.1.1.0/24"
   availability_zone = "${data.alicloud_zones.main.zones.0.id}"
+  name = "${var.name}"
 }
 
 resource "alicloud_cs_swarm" "cs_vpc" {
-  password = "Just$test"
-  instance_type = "ecs.n4.small"
-  name_prefix = "tf-test-swarm-app"
+  password = "Yourpassword1234"
+  instance_type = "${data.alicloud_instance_types.default.instance_types.0.id}"
+  name_prefix = "${var.name}"
   node_number = 2
   disk_category = "cloud_efficiency"
   disk_size = 20
@@ -290,7 +313,7 @@ resource "alicloud_cs_swarm" "cs_vpc" {
 
 resource "alicloud_cs_application" "basic" {
   cluster_name = "${alicloud_cs_swarm.cs_vpc.name}"
-  name = "tf-test-swarm-app-basic"
+  name = "${var.name}"
   version = "1.1"
   description = "from tf creation"
   template = <<DEFINITION
@@ -304,17 +327,25 @@ resource "alicloud_cs_application" "basic" {
 
 func testAccCSApplication_updateConfirm(java string) string {
 	return fmt.Sprintf(`
+variable "name" {
+	default = "tf-testAccCSApplication-update"
+}
 data "alicloud_images" main {
-  most_recent = true
-  name_regex = "^centos_6\\w{1,5}[64].*"
+	most_recent = true
+	name_regex = "^centos_6\\w{1,5}[64].*"
 }
 
 data "alicloud_zones" main {
-  available_resource_creation = "VSwitch"
+  	available_resource_creation = "VSwitch"
+}
+data "alicloud_instance_types" "default" {
+ 	availability_zone = "${data.alicloud_zones.main.zones.0.id}"
+	cpu_core_count = 1
+	memory_size = 2
 }
 
 resource "alicloud_vpc" "foo" {
-  name = "tf-test-swarm-app"
+  name = "${var.name}"
   cidr_block = "10.1.0.0/21"
 }
 
@@ -322,12 +353,13 @@ resource "alicloud_vswitch" "foo" {
   vpc_id = "${alicloud_vpc.foo.id}"
   cidr_block = "10.1.1.0/24"
   availability_zone = "${data.alicloud_zones.main.zones.0.id}"
+  name = "${var.name}"
 }
 
 resource "alicloud_cs_swarm" "cs_vpc" {
-  password = "Just$test"
-  instance_type = "ecs.n4.small"
-  name_prefix = "tf-test-swarm-app"
+  password = "Yourpassword1234"
+  instance_type = "${data.alicloud_instance_types.default.instance_types.0.id}"
+  name_prefix = "${var.name}"
   node_number = 2
   disk_category = "cloud_efficiency"
   disk_size = 20
@@ -338,7 +370,7 @@ resource "alicloud_cs_swarm" "cs_vpc" {
 
 resource "alicloud_cs_application" "basic" {
   cluster_name = "${alicloud_cs_swarm.cs_vpc.name}"
-  name = "tf-test-swarm-app-basic"
+  name = "${var.name}"
   version = "1.1"
   description = "from tf creation"
   template = <<DEFINITION
@@ -364,7 +396,7 @@ slave-java:
 
 var testWebTemplate = `
 web:
-  image: registry.cn-hangzhou.aliyuncs.com/codepipeline_test/subuser:0.1
+  image: registry.cn-beijing.aliyuncs.com/101datumx/web:v0.3.4
   ports:
     - 8080
 `
@@ -382,7 +414,7 @@ slave-java:
       PASSWORD: "$${PASSWORD}"
 
 web:
-  image: registry.cn-hangzhou.aliyuncs.com/codepipeline_test/subuser:0.1
+  image: registry.cn-beijing.aliyuncs.com/101datumx/web:v0.3.4
   ports:
     - 8080
 `

@@ -4,14 +4,26 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/denverdino/aliyungo/ram"
-	"github.com/hashicorp/terraform/helper/resource"
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/aliyun/alibaba-cloud-sdk-go/services/ram"
+	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
+	"github.com/hashicorp/terraform/helper/acctest"
+	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 func TestAccAlicloudRamGroupPolicyAttachment_basic(t *testing.T) {
-	var p ram.Policy
-	var g ram.Group
+	var v *ram.PolicyInListPoliciesForGroup
+	resourceId := "alicloud_ram_group_policy_attachment.default"
+	ra := resourceAttrInit(resourceId, ramGroupMap)
+	serviceFunc := func() interface{} {
+		return &RamService{testAccProvider.Meta().(*connectivity.AliyunClient)}
+	}
+	rc := resourceCheckInit(resourceId, &v, serviceFunc)
+	rac := resourceAttrCheckInit(rc, ra)
+
+	rand := acctest.RandIntRange(1000000, 9999999)
+	name := fmt.Sprintf("tf-testAcc%sRamGroupPolicyAttachmentConfig-%d", defaultRegionToTest, rand)
+	testAccCheck := rac.resourceAttrMapUpdateSet()
+	testAccConfig := resourceTestAccConfigFunc(resourceId, name, resourceRamGroupPolicyAttachmentConfigDependence)
 
 	resource.Test(t, resource.TestCase{
 		PreCheck: func() {
@@ -19,120 +31,68 @@ func TestAccAlicloudRamGroupPolicyAttachment_basic(t *testing.T) {
 		},
 
 		// module name
-		IDRefreshName: "alicloud_ram_group_policy_attachment.attach",
-
-		Providers:    testAccProviders,
-		CheckDestroy: testAccCheckRamGroupPolicyAttachmentDestroy,
+		IDRefreshName: resourceId,
+		Providers:     testAccProviders,
+		CheckDestroy:  rac.checkResourceDestroy(),
 		Steps: []resource.TestStep{
-			resource.TestStep{
-				Config: testAccRamGroupPolicyAttachmentConfig,
+			{
+				Config: testAccConfig(map[string]interface{}{
+					"policy_name": "${alicloud_ram_policy.default.name}",
+					"group_name":  "${alicloud_ram_group.default.name}",
+					"policy_type": "${alicloud_ram_policy.default.type}",
+				}),
 				Check: resource.ComposeTestCheckFunc(
-					testAccCheckRamPolicyExists(
-						"alicloud_ram_policy.policy", &p),
-					testAccCheckRamGroupExists(
-						"alicloud_ram_group.group", &g),
-					testAccCheckRamGroupPolicyAttachmentExists(
-						"alicloud_ram_group_policy_attachment.attach", &p, &g),
+					testAccCheck(nil),
 				),
+			},
+			{
+				ResourceName:      resourceId,
+				ImportState:       true,
+				ImportStateVerify: true,
 			},
 		},
 	})
-
 }
 
-func testAccCheckRamGroupPolicyAttachmentExists(n string, policy *ram.Policy, group *ram.Group) resource.TestCheckFunc {
-	return func(s *terraform.State) error {
-		rs, ok := s.RootModule().Resources[n]
-		if !ok {
-			return fmt.Errorf("Not found: %s", n)
-		}
+var ramGroupMap = map[string]string{
+	"group_name":  CHECKSET,
+	"policy_name": CHECKSET,
+	"policy_type": "Custom",
+}
 
-		if rs.Primary.ID == "" {
-			return fmt.Errorf("No Attachment ID is set")
-		}
-
-		client := testAccProvider.Meta().(*AliyunClient)
-		conn := client.ramconn
-
-		request := ram.GroupQueryRequest{
-			GroupName: group.GroupName,
-		}
-
-		response, err := conn.ListPoliciesForGroup(request)
-		if err == nil {
-			if len(response.Policies.Policy) > 0 {
-				for _, v := range response.Policies.Policy {
-					if v.PolicyName == policy.PolicyName && v.PolicyType == policy.PolicyType {
-						return nil
-					}
-				}
-			}
-			return fmt.Errorf("Error finding attach %s", rs.Primary.ID)
-		}
-		return fmt.Errorf("Error finding attach %s: %#v", rs.Primary.ID, err)
+func resourceRamGroupPolicyAttachmentConfigDependence(name string) string {
+	return fmt.Sprintf(`
+	variable "name" {
+	  default = "%s"
 	}
-}
-
-func testAccCheckRamGroupPolicyAttachmentDestroy(s *terraform.State) error {
-
-	for _, rs := range s.RootModule().Resources {
-		if rs.Type != "alicloud_ram_group_policy_attachment" {
-			continue
-		}
-
-		// Try to find the attachment
-		client := testAccProvider.Meta().(*AliyunClient)
-		conn := client.ramconn
-
-		request := ram.GroupQueryRequest{
-			GroupName: rs.Primary.Attributes["group_name"],
-		}
-
-		response, err := conn.ListPoliciesForGroup(request)
-
-		if err != nil {
-			if RamEntityNotExist(err) {
-				return nil
+	resource "alicloud_ram_policy" "default" {
+	  name = "${var.name}"
+	  document = <<EOF
+		{
+		  "Statement": [
+			{
+			  "Action": [
+				"oss:ListObjects",
+				"oss:ListObjects"
+			  ],
+			  "Effect": "Deny",
+			  "Resource": [
+				"acs:oss:*:*:mybucket",
+				"acs:oss:*:*:mybucket/*"
+			  ]
 			}
-			return err
+		  ],
+			"Version": "1"
 		}
-
-		if len(response.Policies.Policy) > 0 {
-			for _, v := range response.Policies.Policy {
-				if v.PolicyName == rs.Primary.Attributes["name"] && v.PolicyType == rs.Primary.Attributes["policy_type"] {
-					return fmt.Errorf("Error attachment still exist.")
-				}
-			}
-		}
+	  EOF
+	  description = "this is a policy test"
+	  force = true
 	}
-	return nil
-}
 
-const testAccRamGroupPolicyAttachmentConfig = `
-resource "alicloud_ram_policy" "policy" {
-  name = "policyname"
-  statement = [
-    {
-      effect = "Deny"
-      action = [
-        "oss:ListObjects",
-        "oss:ListObjects"]
-      resource = [
-        "acs:oss:*:*:mybucket",
-        "acs:oss:*:*:mybucket/*"]
-    }]
-  description = "this is a policy test"
-  force = true
+	resource "alicloud_ram_group" "default" {
+	  name = "${var.name}"
+	  comments = "group comments"
+	  force=true
+	}
+`, name)
 }
-
-resource "alicloud_ram_group" "group" {
-  name = "groupname"
-  comments = "group comments"
-  force=true
-}
-
-resource "alicloud_ram_group_policy_attachment" "attach" {
-  policy_name = "${alicloud_ram_policy.policy.name}"
-  group_name = "${alicloud_ram_group.group.name}"
-  policy_type = "${alicloud_ram_policy.policy.type}"
-}`
