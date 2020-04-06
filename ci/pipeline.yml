@@ -1246,7 +1246,7 @@ resources:
 - name: terraform-provider-alicloud
   type: git
   source:
-    uri: https://github.com/terraform-providers/terraform-provider-alicloud.git
+    uri: https://github.com/zzxwill/terraform-provider-alicloud.git
     branch: master
 
 - name: aliyun-cli

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	ali_mns "github.com/aliyun/aliyun-mns-go-sdk"
-	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
+	"github.com/zzxwill/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 type MnsService struct {

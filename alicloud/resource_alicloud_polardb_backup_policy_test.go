@@ -6,7 +6,7 @@ import (
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/polardb"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
-	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
+	"github.com/zzxwill/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 func TestAccAlicloudPolarDBBackupPolicy(t *testing.T) {

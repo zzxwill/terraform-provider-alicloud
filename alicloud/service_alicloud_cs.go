@@ -12,7 +12,7 @@ import (
 	"encoding/base64"
 
 	"github.com/denverdino/aliyungo/cs"
-	"github.com/terraform-providers/terraform-provider-alicloud/alicloud/connectivity"
+	"github.com/zzxwill/terraform-provider-alicloud/alicloud/connectivity"
 )
 
 type CsService struct {
