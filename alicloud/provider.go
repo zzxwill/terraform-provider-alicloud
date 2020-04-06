@@ -119,6 +119,12 @@ func Provider() terraform.ResourceProvider {
 				Description:  descriptions["protocol"],
 				ValidateFunc: validation.StringInSlice([]string{"HTTP", "HTTPS"}, false),
 			},
+			"apsara_stack": {
+				Type:        schema.TypeBool,
+				Optional:    true,
+				DefaultFunc: schema.EnvDefaultFunc("APSARA_STACK", os.Getenv("APSARA_STACK")),
+				Description: descriptions["apsara_stack"],
+			},
 		},
 		DataSourcesMap: map[string]*schema.Resource{
 
@@ -506,6 +512,7 @@ func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 		SkipRegionValidation: d.Get("skip_region_validation").(bool),
 		ConfigurationSource:  d.Get("configuration_source").(string),
 		Protocol:             d.Get("protocol").(string),
+		ApsaraStack:          d.Get("apsara_stack").(bool),
 	}
 	token := getProviderConfig(d.Get("security_token").(string), "sts_token")
 	config.SecurityToken = strings.TrimSpace(token)
@@ -674,6 +681,8 @@ func init() {
 		"skip_region_validation": "Skip static validation of region ID. Used by users of alternative AlibabaCloud-like APIs or users w/ access to regions that are not public (yet).",
 
 		"configuration_source": "Use this to mark a terraform configuration file source.",
+
+		"apsara_stack": "Set this to `true` when it is Alibaba Apsara Stack, default to `false` for Alibaba (Public) Cloud.",
 
 		"ecs_endpoint": "Use this to override the default endpoint URL constructed from the `region`. It's typically used to connect to custom ECS endpoints.",
 
