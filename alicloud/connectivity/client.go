@@ -1615,3 +1615,7 @@ func (client *AliyunClient) WithMaxComputeClient(do func(*maxcompute.Client) (in
 
 	return do(client.maxcomputeconn)
 }
+
+func (client *AliyunClient) GetApsaraStack() bool {
+	return client.config.ApsaraStack
+}

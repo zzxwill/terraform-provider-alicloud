@@ -28,7 +28,7 @@ type Config struct {
 	OtsInstanceName string
 	AccountId       string
 	Protocol        string
-	ApsaraStack		bool
+	ApsaraStack     bool
 
 	RamRoleArn               string
 	RamRoleSessionName       string

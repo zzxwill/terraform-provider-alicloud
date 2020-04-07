@@ -846,7 +846,8 @@ func buildAliyunInstanceArgs(d *schema.ResourceData, meta interface{}) (*ecs.Run
 	if v, ok := d.GetOk("security_groups"); ok {
 		// At present, the classic network instance does not support multi sg in runInstances
 		sgs := expandStringList(v.(*schema.Set).List())
-		if d.Get("vswitch_id").(string) == "" && len(sgs) > 0 {
+		// The latest version of Apsara Stack `v3.12` doesn't support multiple security group IDs.
+		if (d.Get("vswitch_id").(string) == "" || client.GetApsaraStack()) && len(sgs) > 0 {
 			request.SecurityGroupId = sgs[0]
 		} else {
 			request.SecurityGroupIds = &sgs
