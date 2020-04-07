@@ -1,4 +1,4 @@
-Terraform Provider For Alibaba Cloud
+Terraform Provider For Alibaba Delicated Cloud (专有云)
 ==================
 
 - Website: https://www.terraform.io
